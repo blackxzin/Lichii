@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -61,7 +62,17 @@ struct BuiltinPatch {
     std::span<const BuiltinPatchRecord> records;
     size_t state_offset = 0;
     size_t state_size = 0;
+    /// When set, the patch applies and is listed only while this environment variable is 1.
+    const char* enable_env = nullptr;
 };
+
+bool BuiltinPatchAllowed(const BuiltinPatch& patch) {
+    if (patch.enable_env == nullptr) {
+        return true;
+    }
+    const char* const value = std::getenv(patch.enable_env);
+    return value != nullptr && std::string_view{value} == "1";
+}
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
@@ -88,6 +99,21 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
 };
 
+// cLohan's OcclusionOff_ZPrePassAndSamplesQuery (zortos293/Lichii#641, #717): the render
+// pipeline's CreateZPrePassOcclusionQuery and CreateSamplesPassedQuery settings read as false
+// (ldrb w8, [x0] -> mov w8, wzr), so the game issues no occlusion queries and no conditional
+// renders. The community IPS offsets are these + 0x100.
+constexpr std::array<u8, 4> LDRB_W8_X0{0x08, 0x00, 0x40, 0x39};
+constexpr std::array<u8, 4> MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
+constexpr std::array OCCLUSION_OFF_RECORDS{
+    BuiltinPatchRecord{0x11ACE68, MOV_W8_WZR, LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B828C, MOV_W8_WZR, LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82A4, MOV_W8_WZR, LDRB_W8_X0},
+    BuiltinPatchRecord{0x11ACEC8, MOV_W8_WZR, LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82DC, MOV_W8_WZR, LDRB_W8_X0},
+    BuiltinPatchRecord{0x11B82F4, MOV_W8_WZR, LDRB_W8_X0},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -106,6 +132,14 @@ constexpr std::array BUILTIN_PATCHES{
         .records = DYNAMIC_FPS_RECORDS,
         .state_offset = 0x4E9FE00,
         .state_size = 16,
+    },
+    BuiltinPatch{
+        .name = "Occlusion Off (built-in, EDEN_NX2_OCCLUSION_OFF=1)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = OCCLUSION_OFF_RECORDS,
+        .enable_env = "EDEN_NX2_OCCLUSION_OFF",
     },
 };
 
@@ -526,7 +560,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     const auto disabled = GetDisabledAddons();
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id || patch.module != name) {
+        if (patch.title_id != title_id || patch.module != name || !BuiltinPatchAllowed(patch)) {
             continue;
         }
         if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
@@ -1169,7 +1203,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id) {
+        if (patch.title_id != title_id || !BuiltinPatchAllowed(patch)) {
             continue;
         }
         const auto patch_disabled =
