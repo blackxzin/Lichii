@@ -1056,9 +1056,18 @@ void Scheduler::EndRenderPass()
                 };
             }
             cmdbuf.EndRenderPass();
-            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
-                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                                   0, nullptr, nullptr, vk::Span(barriers.data(), num_images));
+            // EXPERIMENT (not for nx2): EDEN_NX2_PASS_END_BARRIER=0 leaves out the attachments'
+            // barrier, to measure what it costs per pass change (RADV on GFX8 writes back and
+            // invalidates L2 for it). Unsafe: reads of the attachments can see stale data.
+            static const bool skip_barrier = [] {
+                const char* value = std::getenv("EDEN_NX2_PASS_END_BARRIER");
+                return value != nullptr && std::string_view{value} == "0";
+            }();
+            if (!skip_barrier) {
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+                                       0, nullptr, nullptr, vk::Span(barriers.data(), num_images));
+            }
             if (has_transform_feedback) {
                 static constexpr VkMemoryBarrier XFB_OUTPUT_BARRIER{
                     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
