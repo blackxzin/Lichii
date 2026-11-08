@@ -3118,6 +3118,42 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
     return FindRenderTargetView(info, gpu_addr);
 }
 
+// With a dynamic resolution a render target can be declared as wide as its aligned surface while
+// the game samples the picture at its own width: Ocarina of Time draws an 854x480 frame into
+// surfaces of 864x480. Two images then hold the same memory, and each is synchronized from the
+// other by a copy whenever it is used after the other was written (about 80 copies of a depth
+// buffer a frame in Kokiri Forest). Render into the narrower image while the render area fits.
+template <class P>
+ImageId TextureCache<P>::FindNarrowerRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const u32 render_width = clip.x + clip.width;
+    if (info.type != ImageType::e2D || info.resources.levels != 1 ||
+        info.resources.layers != 1 || render_width >= info.size.width ||
+        Settings::values.resolution_info.active) {
+        return ImageId{};
+    }
+    const size_t size = CalculateGuestSizeInBytes(info);
+    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size);
+    if (!cpu_addr) {
+        return ImageId{};
+    }
+    ImageId narrower{};
+    ForEachImageInRegion(*cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
+        const ImageInfo& existing = image.info;
+        if (image.gpu_addr != gpu_addr || True(image.flags & ImageFlagBits::Remapped) ||
+            existing.type != ImageType::e2D || existing.format != info.format ||
+            existing.num_samples != info.num_samples || existing.block != info.block ||
+            existing.resources.layers != 1 || existing.size.height != info.size.height ||
+            existing.size.width >= info.size.width || existing.size.width < render_width ||
+            !IsBlockLinearSizeCompatible(existing, info, 0, 0, false)) {
+            return false;
+        }
+        narrower = image_id;
+        return true;
+    });
+    return narrower;
+}
+
 template <class P>
 ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr) {
     static constexpr u32 MaxRenderTargetSize = 32768;
@@ -3128,14 +3164,16 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
                   info.size.height, info.resources.layers, gpu_addr);
         return ImageViewId{};
     }
-    ImageId image_id{};
-    bool delete_state = has_deleted_images;
-    do {
-        has_deleted_images = false;
-        image_id = FindOrInsertImage(info, gpu_addr);
-        delete_state |= has_deleted_images;
-    } while (has_deleted_images);
-    has_deleted_images = delete_state;
+    ImageId image_id = FindNarrowerRenderTarget(info, gpu_addr);
+    if (!image_id) {
+        bool delete_state = has_deleted_images;
+        do {
+            has_deleted_images = false;
+            image_id = FindOrInsertImage(info, gpu_addr);
+            delete_state |= has_deleted_images;
+        } while (has_deleted_images);
+        has_deleted_images = delete_state;
+    }
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
     }
