@@ -504,14 +504,14 @@ void BufferCacheRuntime::WaitSubmittedTick(u64 tick) {
     master.Wait(tick);
 }
 
-void BufferCacheRuntime::Finish() {
-    scheduler.Finish();
+void BufferCacheRuntime::Finish(std::source_location location) {
+    scheduler.Finish({}, {}, location);
 }
 
-void BufferCacheRuntime::FinishForHostRead() {
-    scheduler.RequestOutsideRenderPassOperationContext();
+void BufferCacheRuntime::FinishForHostRead(std::source_location location) {
+    scheduler.RequestOutsideRenderPassOperationContext(location);
     scheduler.Record(HostReadBarrier);
-    scheduler.Finish();
+    scheduler.Finish({}, {}, location);
 }
 
 bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,

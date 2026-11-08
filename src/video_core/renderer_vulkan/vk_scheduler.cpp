@@ -45,6 +45,12 @@ std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
 std::map<std::string, u64> g_profile_ends;
+struct SiteTotals {
+    u64 count{};
+    u64 ns{};
+};
+std::map<std::string, SiteTotals> g_profile_flush_sites;
+std::map<std::string, SiteTotals> g_profile_finish_sites;
 
 void CountRenderPassEnd(const char* file, u32 line) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
@@ -56,6 +62,37 @@ void CountRenderPassEnd(const char* file, u32 line) {
     }
     std::scoped_lock lock{g_profile_end_mutex};
     ++g_profile_ends[fmt::format("{}:{}", name, line)];
+}
+
+void CountSite(std::map<std::string, SiteTotals>& sites, const std::source_location& location,
+               u64 ns) {
+    std::string_view name{location.file_name()};
+    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
+        name.remove_prefix(slash + 1);
+    }
+    std::scoped_lock lock{g_profile_end_mutex};
+    SiteTotals& totals = sites[fmt::format("{}:{}", name, location.line())];
+    ++totals.count;
+    totals.ns += ns;
+}
+
+void ReportSites(std::map<std::string, SiteTotals>& sites, const char* what, double seconds) {
+    std::vector<std::pair<SiteTotals, std::string>> sorted;
+    {
+        std::scoped_lock lock{g_profile_end_mutex};
+        for (const auto& [site, totals] : sites) {
+            sorted.emplace_back(totals, site);
+        }
+        sites.clear();
+    }
+    std::ranges::sort(sorted, [](const auto& a, const auto& b) {
+        return a.first.ns != b.first.ns ? a.first.ns > b.first.ns : a.first.count > b.first.count;
+    });
+    for (size_t i = 0; i < sorted.size() && i < 8; ++i) {
+        LOG_INFO(Render_Vulkan, "{} {:.0f}/s waiting {:.1f} ms/s at {}", what,
+                 static_cast<double>(sorted[i].first.count) / seconds,
+                 static_cast<double>(sorted[i].first.ns) / 1e6 / seconds, sorted[i].second);
+    }
 }
 
 void ReportSubmitCounts() {
@@ -90,6 +127,8 @@ void ReportSubmitCounts() {
         LOG_INFO(Render_Vulkan, "Render pass ends {:.0f}/s at {}",
                  static_cast<double>(ends[i].first) / seconds, ends[i].second);
     }
+    ReportSites(g_profile_flush_sites, "Flushes", seconds);
+    ReportSites(g_profile_finish_sites, "Finishes", seconds);
 }
 }
 
@@ -176,6 +215,9 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     AllocateNewContext();
     last_flush = std::chrono::steady_clock::now();
     flush_pending = false;
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        CountSite(g_profile_flush_sites, location, 0);
+    }
     return signal_value;
 }
 
@@ -255,8 +297,9 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     flush_pending = false;
     if (profile) {
         g_profile_finishes.fetch_add(1, std::memory_order_relaxed);
-        g_profile_finish_ns.fetch_add(VideoCommon::Nx2Profile::Now() - start,
-                                      std::memory_order_relaxed);
+        const u64 waited = VideoCommon::Nx2Profile::Now() - start;
+        g_profile_finish_ns.fetch_add(waited, std::memory_order_relaxed);
+        CountSite(g_profile_finish_sites, location, waited);
     }
 }
 
