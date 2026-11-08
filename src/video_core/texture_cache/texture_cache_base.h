@@ -453,6 +453,8 @@ private:
     /// covers the render area
     [[nodiscard]] ImageId FindNarrowerRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr);
 
+    [[nodiscard]] bool NarrowedDepthBufferTooNarrow() const;
+
     /// Iterates over all the images in a region calling func
     template <typename Func>
     void ForEachImageInRegion(DAddr cpu_addr, size_t size, Func&& func);
@@ -560,6 +562,8 @@ private:
     u64 last_feedback_texture_serial = 0;
     bool last_feedback_loop_result = false;
     bool feedback_depth_dirty = true;
+    // Depth image FindNarrowerRenderTarget bound in place of the declared one; the game samples it.
+    ImageId narrowed_depth_image{};
     FramebufferId last_framebuffer_id{};
     u64 last_framebuffer_serial = 0;
 
