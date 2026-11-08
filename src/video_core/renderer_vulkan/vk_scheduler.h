@@ -93,8 +93,14 @@ public:
             return;
         }
         const u32 query = trace_work_count * 2;
-        trace_work_items[trace_work_count++] = {hash, fragment_hash, size, trace_gpu_count,
-                                                trace_render_pass, trace_render_area};
+        trace_work_items[trace_work_count++] = {hash,
+                                                fragment_hash,
+                                                size,
+                                                trace_gpu_count,
+                                                trace_render_pass,
+                                                trace_render_area,
+                                                trace_end_file,
+                                                trace_end_line};
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query);
         work();
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
@@ -431,6 +437,7 @@ private:
     void AllocateWorkerCommandBuffer();
 
     void TraceGpuSubmission();
+    void NoteRenderPassEnd(const std::source_location& location);
     struct TraceTimestamp {
         u64 timestamp;
         u64 available;
@@ -487,12 +494,20 @@ private:
         u32 submission{};
         u32 render_pass{};
         VkExtent2D render_area{};
+        /// What ended the render pass before this one (a scheduler call site), if known.
+        const char* end_file{};
+        u32 end_line{};
     };
     vk::QueryPool trace_work_pool;
     std::vector<WorkTrace> trace_work_items;
     u32 trace_work_count{};
     u32 trace_render_pass{};
     VkExtent2D trace_render_area{};
+    const char* trace_end_file{};
+    u32 trace_end_line{};
+    /// Main thread: the call site ending the active render pass, for the next EndRenderPass.
+    const char* end_site_file{};
+    u32 end_site_line{};
     Common::DkbFrameTrace::RateLimit trace_gpu_rate;
     u64 trace_gpu_tick{};
     u64 trace_frame_end{};

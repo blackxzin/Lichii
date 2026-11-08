@@ -47,14 +47,19 @@ std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
 std::map<std::string, u64> g_profile_ends;
 
+const char* FileName(const char* file) {
+    std::string_view name{file};
+    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
+        return file + slash + 1;
+    }
+    return file;
+}
+
 void CountRenderPassEnd(const char* file, u32 line) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
         return;
     }
-    std::string_view name{file};
-    if (const auto slash = name.find_last_of('/'); slash != std::string_view::npos) {
-        name.remove_prefix(slash + 1);
-    }
+    const std::string_view name{FileName(file)};
     std::scoped_lock lock{g_profile_end_mutex};
     ++g_profile_ends[fmt::format("{}:{}", name, line)];
 }
@@ -92,6 +97,14 @@ void ReportSubmitCounts() {
                  static_cast<double>(ends[i].first) / seconds, ends[i].second);
     }
 }
+}
+
+void Scheduler::NoteRenderPassEnd(const std::source_location& location) {
+    CountRenderPassEnd(location.file_name(), location.line());
+    if (trace_query_pool) {
+        end_site_file = FileName(location.file_name());
+        end_site_line = location.line();
+    }
 }
 
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
@@ -167,7 +180,7 @@ Scheduler::~Scheduler() {
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                      std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        NoteRenderPassEnd(location);
     }
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Flush");
@@ -240,7 +253,7 @@ bool Scheduler::WaitSubmitted(u64 tick) {
 void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                        std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        NoteRenderPassEnd(location);
     }
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Finish");
@@ -444,7 +457,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
         return;
     }
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        NoteRenderPassEnd(location);
     }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
@@ -453,7 +466,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
     if (state.renderpass) {
-        CountRenderPassEnd(location.file_name(), location.line());
+        NoteRenderPassEnd(location);
     }
     EndRenderPass();
 }
@@ -697,17 +710,22 @@ void Scheduler::ReportWorkTimes(std::span<const u64> submission_timestamps) {
 // blits) and between submissions (idle, or another queue's work).
 void Scheduler::ReportWorkGaps(std::span<const TraceTimestamp> results,
                                std::span<const u64> submission_timestamps) {
+    // Work of a later submission can start before an earlier one ends: such overlaps are no gap.
     const auto ms = [this](u64 begin, u64 end) {
-        return static_cast<double>(
-                   Common::DkbFrameTrace::TimestampDelta(begin, end, trace_timestamp_bits)) *
-               trace_timestamp_period / 1e6;
+        const u64 delta = Common::DkbFrameTrace::TimestampDelta(begin, end, trace_timestamp_bits);
+        if (delta >> (trace_timestamp_bits - 1) != 0) {
+            return 0.0;
+        }
+        return static_cast<double>(delta) * trace_timestamp_period / 1e6;
     };
     struct Totals {
         double total_ms{};
         u32 count{};
     };
-    // Render pass changes, by the render area of the pass the next work runs in.
+    // Render pass changes, by the render area of the pass the next work runs in and by what ended
+    // the previous pass.
     std::map<std::pair<u32, u32>, Totals> by_area;
+    std::map<std::string, Totals> by_end;
     double in_pass_ms{}, pass_change_ms{}, submission_edges_ms{}, between_submissions_ms{};
     u32 pass_changes{};
     const u32 submissions = static_cast<u32>(submission_timestamps.size() / 2);
@@ -738,6 +756,11 @@ void Scheduler::ReportWorkGaps(std::span<const TraceTimestamp> results,
                 Totals& totals = by_area[{item.render_area.width, item.render_area.height}];
                 totals.total_ms += gap;
                 ++totals.count;
+                Totals& end = by_end[item.end_file ? fmt::format("{}:{}", item.end_file,
+                                                                 item.end_line)
+                                                   : std::string{"other"}];
+                end.total_ms += gap;
+                ++end.count;
             }
         }
         previous = i;
@@ -751,23 +774,32 @@ void Scheduler::ReportWorkGaps(std::span<const TraceTimestamp> results,
         between_submissions_ms +=
             ms(submission_timestamps[i * 2 - 1], submission_timestamps[i * 2]);
     }
-    std::vector<std::pair<std::pair<u32, u32>, Totals>> sorted(by_area.begin(), by_area.end());
-    std::ranges::sort(sorted, std::greater<>{},
-                      [](const auto& entry) { return entry.second.total_ms; });
-    if (sorted.size() > 8) {
-        sorted.resize(8);
-    }
-    std::string areas;
-    for (const auto& [area, totals] : sorted) {
-        areas += fmt::format(" {}x{}={:.3f}ms/{}x", area.first, area.second, totals.total_ms,
-                             totals.count);
-    }
+    const auto slowest = [](const auto& totals_by_key, auto&& format_key) {
+        std::vector<std::pair<std::string, Totals>> sorted;
+        for (const auto& [key, totals] : totals_by_key) {
+            sorted.emplace_back(format_key(key), totals);
+        }
+        std::ranges::sort(sorted, std::greater<>{},
+                          [](const auto& entry) { return entry.second.total_ms; });
+        if (sorted.size() > 8) {
+            sorted.resize(8);
+        }
+        std::string text;
+        for (const auto& [key, totals] : sorted) {
+            text += fmt::format(" {}={:.3f}ms/{}x", key, totals.total_ms, totals.count);
+        }
+        return text;
+    };
+    const std::string areas = slowest(by_area, [](const std::pair<u32, u32>& area) {
+        return fmt::format("{}x{}", area.first, area.second);
+    });
+    const std::string ends = slowest(by_end, [](const std::string& site) { return site; });
     LOG_INFO(Render_Vulkan,
              "DKB gpu_gaps renderer_frame={} render_passes={} in_pass_ms={:.3f} "
              "pass_change_ms={:.3f} pass_changes={} submission_edges_ms={:.3f} "
-             "between_submissions_ms={:.3f} pass_changes_by_area:{}",
+             "between_submissions_ms={:.3f} pass_changes_by_area:{} pass_changes_by_end:{}",
              trace_sample_frame, trace_render_pass, in_pass_ms, pass_change_ms, pass_changes,
-             submission_edges_ms, between_submissions_ms, areas);
+             submission_edges_ms, between_submissions_ms, areas, ends);
 }
 
 void Scheduler::TraceGpuSubmission() {
@@ -978,11 +1010,16 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
-        Record([num_images = num_renderpass_images,
+        Record([this, end_file = std::exchange(end_site_file, nullptr),
+                end_line = std::exchange(end_site_line, 0), num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
                        has_transform_feedback = device.IsExtTransformFeedbackSupported()](
                           vk::CommandBuffer cmdbuf) {
+            if (trace_gpu_recording) {
+                trace_end_file = end_file;
+                trace_end_line = end_line;
+            }
             std::array<VkImageMemoryBarrier, 9> barriers;
             for (size_t i = 0; i < num_images; ++i) {
                 const VkImageSubresourceRange& range = ranges[i];
