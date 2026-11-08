@@ -3010,6 +3010,7 @@ template <class P>
 void TextureCache<P>::InvalidateScale(Image& image) {
     ++bindings_epoch;
     BumpBindingEpoch();
+    ++scale_epoch;
     if (image.scale_tick <= frame_tick) {
         image.scale_tick = frame_tick + 1;
     }
