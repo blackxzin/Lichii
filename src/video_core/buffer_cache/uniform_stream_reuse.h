@@ -95,10 +95,13 @@ public:
         u32 serial{};  ///< changes whenever the bytes change
     };
 
-    /// The copy a (stage, constant buffer) slot bound last.
+    /// The copy a (stage, constant buffer) slot bound last, and the guest range it bound it for
+    /// (uniform keeps: a slot hit can bind a copy made from another range with the same bytes).
     struct Slot {
         u32 copy{};
         u32 serial{}; ///< the copy's serial then; 0: none
+        u64 address{};
+        u32 size{};
     };
 
     UniformStreamReuse() : bytes{new u8[NumCopies * MaxBytes]} {}
@@ -197,7 +200,7 @@ template <class Runtime, class DeviceMemory>
     const auto rebind = [&](size_t copy_index, UniformReuseResult kind) {
         const typename Reuse::Copy& copy = reuse.copies[copy_index];
         runtime.RebindStreamUniform(copy.ref, size);
-        slot = typename Reuse::Slot{static_cast<u32>(copy_index), copy.serial};
+        slot = typename Reuse::Slot{static_cast<u32>(copy_index), copy.serial, device_addr, size};
         if (result != nullptr) {
             *result = kind;
         }
@@ -264,11 +267,66 @@ template <class Runtime, class DeviceMemory>
     copy.ref = runtime.LastStreamUniformRef();
     // After the allocation: the tick the stream region is tagged with is the one current now.
     copy.tick = runtime.CurrentTick();
-    slot = typename Reuse::Slot{static_cast<u32>(target), copy.serial};
+    slot = typename Reuse::Slot{static_cast<u32>(target), copy.serial, device_addr, size};
     if (result != nullptr) {
         *result = slot_same ? UniformReuseResult::Recopied : UniformReuseResult::Copied;
     }
     return true;
+}
+
+/// EDEN_NX2_UNIFORM_KEEPS=0 turns uniform keeps off (every delta draw compares the guest bytes).
+inline const bool g_uniform_keeps = [] {
+    const char* const value = std::getenv("EDEN_NX2_UNIFORM_KEEPS");
+    return value == nullptr || value[0] != '0';
+}();
+
+[[nodiscard]] inline bool UniformKeepsEnabled() noexcept {
+    return g_uniform_keeps;
+}
+
+/// Uniform keeps: binds the copy the slot bound last again without reading guest memory, when
+/// that bind was for the same range and its allocation was made in this command buffer. The
+/// caller guarantees that nothing ordered before this draw wrote the range since that bind (the
+/// previous draw's). Returns false (nothing bound) otherwise.
+template <class Runtime>
+[[nodiscard]] bool RebindKeptUniform(Runtime& runtime, size_t stage, u32 index, u64 device_addr,
+                                     u32 size) {
+    using Reuse = UniformStreamReuse<typename Runtime::StreamUniformRef>;
+    if (size == 0 || size > Reuse::MaxBytes || stage >= Reuse::NumStages ||
+        index >= Reuse::NumSlots) {
+        return false;
+    }
+    const Reuse& reuse = UniformStreamReuseState<typename Runtime::StreamUniformRef>();
+    const typename Reuse::Slot& slot = reuse.slots[stage][index];
+    if (slot.serial == 0 || slot.address != device_addr || slot.size != size) {
+        return false;
+    }
+    const typename Reuse::Copy& copy = reuse.copies[slot.copy];
+    if (copy.serial != slot.serial || copy.size != size || copy.tick != runtime.CurrentTick()) {
+        return false;
+    }
+    runtime.RebindStreamUniform(copy.ref, size);
+    return true;
+}
+
+/// EDEN_NX2_UBO_KEEP_VERIFY: whether guest memory still holds the bytes of the copy
+/// RebindKeptUniform would bind again.
+template <class Runtime, class DeviceMemory>
+[[nodiscard]] bool KeptUniformHolds(DeviceMemory& device_memory, size_t stage, u32 index,
+                                    u64 device_addr, u32 size) {
+    using Reuse = UniformStreamReuse<typename Runtime::StreamUniformRef>;
+    if (size == 0 || size > Reuse::MaxBytes || stage >= Reuse::NumStages ||
+        index >= Reuse::NumSlots) {
+        return false;
+    }
+    Reuse& reuse = UniformStreamReuseState<typename Runtime::StreamUniformRef>();
+    const typename Reuse::Slot& slot = reuse.slots[stage][index];
+    if (slot.serial == 0 || slot.address != device_addr || slot.size != size ||
+        reuse.copies[slot.copy].serial != slot.serial || reuse.copies[slot.copy].size != size) {
+        return false;
+    }
+    device_memory.ReadBlockUnsafe(device_addr, reuse.scratch.data(), size);
+    return std::memcmp(reuse.Bytes(slot.copy), reuse.scratch.data(), size) == 0;
 }
 
 } // namespace VideoCommon
