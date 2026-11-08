@@ -44,8 +44,15 @@ enum class LoadCallbackStage {
     Prepare,
     Build,
     Complete,
+    /// The shader precache running before the game starts (programs built / total).
+    /// Last, so the values of the others stay as frontends that know only those expect.
+    Warm,
 };
 using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size_t, std::size_t)>;
+
+/// Set while the query cache signals the fence that writes a fence-flagged report, so the fence
+/// manager makes that fence even when it is empty (FenceManager::SignalFence).
+inline thread_local bool g_signaling_query_report_fence = false;
 
 class RasterizerInterface {
 public:
@@ -163,10 +170,12 @@ public:
                                     [[maybe_unused]] VideoCommon::CacheType which) {}
 
     virtual void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
-        if (!Settings::values.skip_cpu_inner_invalidation.GetValue()) {
-            for (const auto& [cpu_addr, size] : sequences) {
-                InvalidateRegion(cpu_addr, size);
-            }
+        // The skip keeps the texture cache: software engine writes reach images only here.
+        const auto which = Settings::values.skip_cpu_inner_invalidation.GetValue()
+                               ? VideoCommon::CacheType::TextureCache
+                               : VideoCommon::CacheType::All;
+        for (const auto& [cpu_addr, size] : sequences) {
+            InvalidateRegion(cpu_addr, size, which);
         }
     }
 

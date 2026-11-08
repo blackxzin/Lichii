@@ -67,6 +67,7 @@
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/memory_manager.h"
@@ -1753,7 +1754,8 @@ void RasterizerVulkan::DispatchCompute() {
         frame_dump.DrainIfFull();
     }
 
-    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};
+    u64 native_key{};
+    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline(native_key)};
     if (!pipeline) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
@@ -1805,6 +1807,20 @@ void RasterizerVulkan::DispatchCompute() {
     }
 
     const auto& qmd{kepler_compute->launch_description};
+    const auto publish_collision_map = [&] {
+        if (native_key != 0x6e0ae200ee9aa220ULL ||
+            (qmd.const_buffer_enable_mask & 1) == 0) {
+            return;
+        }
+        const auto& constants = qmd.const_buffer_config[0];
+        if (constants.size < 0x3c) {
+            return;
+        }
+        // WaterSurfaceCollisionHeightMap exposes its output handle in CB0.
+        const u32 handle = gpu_memory->Read<u32>(constants.Address() + 0x38);
+        const u32 index = Tegra::Texture::TexturePair(handle, qmd.linked_tsc != 0).first;
+        texture_cache.PublishComputeCollisionImage(index);
+    };
     // Earlier writes must be visible to the dispatch, its indirect arguments included, and what it
     // writes to the next render pass.
     const auto record_read_barrier = [this] {
@@ -1853,6 +1869,7 @@ void RasterizerVulkan::DispatchCompute() {
             });
         });
         SubmitNx2ListCopies();
+        publish_collision_map();
         return;
     }
     const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
@@ -1906,6 +1923,7 @@ void RasterizerVulkan::DispatchCompute() {
         scheduler.InvalidateState();
     }
     SubmitNx2ListCopies();
+    publish_collision_map();
 
 #ifdef EGLANTINE_STREAMLINE
     if (!can_replace) {
@@ -2051,12 +2069,19 @@ bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     {
         std::scoped_lock lock{texture_cache.mutex};
-        auto area = texture_cache.GetFlushArea(addr, size);
-        if (area) {
-            return *area;
-        }
+        texture_area = texture_cache.GetFlushArea(addr, size);
+    }
+    if (texture_area) {
+        // The core disarmed the read's pages before asking, and skips later reads in this area,
+        // even through another device alias of those pages. The buffer cache arms only pages it
+        // doesn't count as armed, so it must forget the whole area.
+        std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.ForgetReadTraps(texture_area->start_address,
+                                     texture_area->end_address - texture_area->start_address);
+        return *texture_area;
     }
     if (buffer_cache.FlushesOnCpuRead()) {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -2102,9 +2127,6 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
-    if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
-        return;
-    }
     // The GPU's own cached writes (constant buffer data, every draw): most land where no image,
     // query or shader was ever registered, which page_filter tells without the caches' locks.
     const auto any = [&](const VideoCommon::PageFilter& filter) {
@@ -2115,11 +2137,16 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
         }
         return false;
     };
+    // Even with skip_cpu_inner_invalidation: engines writing images in software (DMA pitch to
+    // block linear copies of decoded video frames) reach the texture cache only through here.
     if (any(texture_cache.page_filter)) {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
             texture_cache.WriteMemory(addr, size);
         }
+    }
+    if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
+        return;
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
