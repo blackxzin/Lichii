@@ -16,6 +16,7 @@
 #include <utility>
 #include <queue>
 #include <source_location>
+#include <span>
 #include <vector>
 
 #include "common/alignment.h"
@@ -92,7 +93,8 @@ public:
             return;
         }
         const u32 query = trace_work_count * 2;
-        trace_work_items[trace_work_count++] = {hash, fragment_hash, size};
+        trace_work_items[trace_work_count++] = {hash, fragment_hash, size, trace_gpu_count,
+                                                trace_render_pass, trace_render_area};
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query);
         work();
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
@@ -429,7 +431,13 @@ private:
     void AllocateWorkerCommandBuffer();
 
     void TraceGpuSubmission();
-    void ReportWorkTimes();
+    struct TraceTimestamp {
+        u64 timestamp;
+        u64 available;
+    };
+    void ReportWorkTimes(std::span<const u64> submission_timestamps);
+    void ReportWorkGaps(std::span<const TraceTimestamp> results,
+                        std::span<const u64> submission_timestamps);
     void TraceShader(u64 hash, u32 stage);
 
     u64 SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore);
@@ -474,10 +482,17 @@ private:
         u64 fragment_hash{};
         /// Dispatch grid, or vertex and instance counts of a draw; zero when indirect.
         std::array<u32, 3> size{};
+        /// Submission of the sampled frame and render pass it was recorded in, for the time
+        /// between timed work (pass ends and begins, barriers, copies).
+        u32 submission{};
+        u32 render_pass{};
+        VkExtent2D render_area{};
     };
     vk::QueryPool trace_work_pool;
     std::vector<WorkTrace> trace_work_items;
     u32 trace_work_count{};
+    u32 trace_render_pass{};
+    VkExtent2D trace_render_area{};
     Common::DkbFrameTrace::RateLimit trace_gpu_rate;
     u64 trace_gpu_tick{};
     u64 trace_frame_end{};

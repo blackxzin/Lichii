@@ -12,6 +12,7 @@
 #include <string_view>
 #include <string>
 #include <map>
+#include <optional>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -322,8 +323,12 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
         values[i] = clear_values[i];
     }
     const bool after_compute = std::exchange(compute_writes_pending, false);
-    Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
+    Record([this, renderpass, framebuffer_handle, render_area, values, clear_value_count,
             after_compute](vk::CommandBuffer cmdbuf) {
+        if (trace_gpu_recording) {
+            ++trace_render_pass;
+            trace_render_area = render_area;
+        }
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -623,16 +628,13 @@ void Scheduler::TraceComputePipeline(u64 hash) {
     });
 }
 
-void Scheduler::ReportWorkTimes() {
+void Scheduler::ReportWorkTimes(std::span<const u64> submission_timestamps) {
     const u32 count = trace_work_count;
     trace_work_count = 0;
     if (count == 0) {
         return;
     }
-    struct Result {
-        u64 timestamp;
-        u64 available;
-    };
+    using Result = TraceTimestamp;
     std::vector<Result> results(count * 2);
     const auto result = device.GetLogical().GetQueryResults(
         *trace_work_pool, 0, count * 2, results.size() * sizeof(Result), results.data(),
@@ -686,6 +688,86 @@ void Scheduler::ReportWorkTimes() {
     LOG_INFO(Render_Vulkan,
              "DKB gpu_work renderer_frame={} timed={} timed_sum_ms={:.3f} slowest:{}",
              trace_sample_frame, count, total_ms, slowest);
+    ReportWorkGaps(results, submission_timestamps);
+}
+
+// The GPU time of the sampled frame that no timed draw or dispatch covers: between work of one
+// render pass, across render pass changes (store, layout transitions, the next pass's load and
+// clears), before the first and after the last timed work of a submission (uploads, copies,
+// blits) and between submissions (idle, or another queue's work).
+void Scheduler::ReportWorkGaps(std::span<const TraceTimestamp> results,
+                               std::span<const u64> submission_timestamps) {
+    const auto ms = [this](u64 begin, u64 end) {
+        return static_cast<double>(
+                   Common::DkbFrameTrace::TimestampDelta(begin, end, trace_timestamp_bits)) *
+               trace_timestamp_period / 1e6;
+    };
+    struct Totals {
+        double total_ms{};
+        u32 count{};
+    };
+    // Render pass changes, by the render area of the pass the next work runs in.
+    std::map<std::pair<u32, u32>, Totals> by_area;
+    double in_pass_ms{}, pass_change_ms{}, submission_edges_ms{}, between_submissions_ms{};
+    u32 pass_changes{};
+    const u32 submissions = static_cast<u32>(submission_timestamps.size() / 2);
+    std::optional<u32> previous;
+    for (u32 i = 0; i < results.size() / 2; ++i) {
+        if (results[i * 2].available == 0 || results[i * 2 + 1].available == 0) {
+            continue;
+        }
+        const WorkTrace& item = trace_work_items[i];
+        if (item.submission >= submissions) {
+            continue;
+        }
+        if (!previous || trace_work_items[*previous].submission != item.submission) {
+            if (previous) {
+                const u32 last = trace_work_items[*previous].submission;
+                submission_edges_ms +=
+                    ms(results[*previous * 2 + 1].timestamp, submission_timestamps[last * 2 + 1]);
+            }
+            submission_edges_ms +=
+                ms(submission_timestamps[item.submission * 2], results[i * 2].timestamp);
+        } else {
+            const double gap = ms(results[*previous * 2 + 1].timestamp, results[i * 2].timestamp);
+            if (trace_work_items[*previous].render_pass == item.render_pass) {
+                in_pass_ms += gap;
+            } else {
+                pass_change_ms += gap;
+                ++pass_changes;
+                Totals& totals = by_area[{item.render_area.width, item.render_area.height}];
+                totals.total_ms += gap;
+                ++totals.count;
+            }
+        }
+        previous = i;
+    }
+    if (previous) {
+        const u32 last = trace_work_items[*previous].submission;
+        submission_edges_ms +=
+            ms(results[*previous * 2 + 1].timestamp, submission_timestamps[last * 2 + 1]);
+    }
+    for (u32 i = 1; i < submissions; ++i) {
+        between_submissions_ms +=
+            ms(submission_timestamps[i * 2 - 1], submission_timestamps[i * 2]);
+    }
+    std::vector<std::pair<std::pair<u32, u32>, Totals>> sorted(by_area.begin(), by_area.end());
+    std::ranges::sort(sorted, std::greater<>{},
+                      [](const auto& entry) { return entry.second.total_ms; });
+    if (sorted.size() > 8) {
+        sorted.resize(8);
+    }
+    std::string areas;
+    for (const auto& [area, totals] : sorted) {
+        areas += fmt::format(" {}x{}={:.3f}ms/{}x", area.first, area.second, totals.total_ms,
+                             totals.count);
+    }
+    LOG_INFO(Render_Vulkan,
+             "DKB gpu_gaps renderer_frame={} render_passes={} in_pass_ms={:.3f} "
+             "pass_change_ms={:.3f} pass_changes={} submission_edges_ms={:.3f} "
+             "between_submissions_ms={:.3f} pass_changes_by_area:{}",
+             trace_sample_frame, trace_render_pass, in_pass_ms, pass_change_ms, pass_changes,
+             submission_edges_ms, between_submissions_ms, areas);
 }
 
 void Scheduler::TraceGpuSubmission() {
@@ -756,7 +838,11 @@ void Scheduler::TraceGpuSubmission() {
                      trace_sample_frame, work.tick, duration_ms, work.draw_attempts,
                      work.dispatch_attempts, shaders, work.untracked_uses);
         }
-        ReportWorkTimes();
+        std::vector<u64> submission_timestamps(trace_gpu_count * 2);
+        for (u32 i = 0; i < submission_timestamps.size(); ++i) {
+            submission_timestamps[i] = results[i].timestamp;
+        }
+        ReportWorkTimes(submission_timestamps);
         trace_gpu_tick = 0;
         trace_gpu_count = 0;
         trace_gpu_skipped = 0;
@@ -770,6 +856,7 @@ void Scheduler::TraceGpuSubmission() {
     if (trace_gpu_count == 0 && trace_work_pool) {
         // Draws are timed inside render passes, where queries cannot be reset.
         current_upload_cmdbuf.ResetQueryPool(*trace_work_pool, 0, TraceMaxWork * 2);
+        trace_render_pass = 0;
     }
     current_upload_cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, *trace_query_pool,
                                         trace_gpu_count * 2);
