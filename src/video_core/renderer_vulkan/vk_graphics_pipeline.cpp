@@ -866,12 +866,13 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 (has_task && (!task_compute_pipeline || !distribution_pipeline))) {
                 return;
             }
-            // EDEN_DKB_FRAME_TRACE times the emulated task and mesh programs as one dispatch,
-            // labelled with the program's hash and no fragment hash, apart from the draw.
+            // EDEN_DKB_FRAME_TRACE times the emulated programs apart from the draw, labelled with
+            // the program's hash and, in place of a fragment hash, the step: 1 task, 2
+            // distribution, 3 mesh.
             const auto hashes = std::span{key.unique_hashes}.first(5);
             const auto program = std::ranges::find_if(hashes, [](u64 hash) { return hash != 0; });
-            const std::optional<u32> trace_query = scheduler.BeginGpuWork(
-                cmdbuf, program != hashes.end() ? *program : 0, 0, {groups, 1, 1});
+            const u64 program_hash = program != hashes.end() ? *program : 0;
+            enum : u64 { TraceTask = 1, TraceDistribution = 2, TraceMesh = 3 };
             const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
             device.GetLogical().UpdateDescriptorSet(descriptor_set, *descriptor_update_template,
                                                     descriptor_data);
@@ -913,25 +914,32 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
             if (!has_task) {
+                const auto mesh_query =
+                    scheduler.BeginGpuWork(cmdbuf, program_hash, TraceMesh, {groups, 1, 1});
                 cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
                 bind_program_state();
                 cmdbuf.Dispatch(groups, 1, 1);
                 memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
-                scheduler.EndGpuWork(cmdbuf, trace_query);
+                scheduler.EndGpuWork(cmdbuf, mesh_query);
                 return;
             }
             // 1. One task workgroup per draw group writes its payload (mesh workgroup count at
             //    word 1).
+            const auto task_query =
+                scheduler.BeginGpuWork(cmdbuf, program_hash, TraceTask, {groups, 1, 1});
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *task_compute_pipeline);
             bind_program_state();
             cmdbuf.Dispatch(groups, 1, 1);
             memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            scheduler.EndGpuWork(cmdbuf, task_query);
             // 2. Distribution: each task's first mesh workgroup, the draw's place in the output
             //    arena, and the mesh dispatch and draw arguments.
+            const auto distribution_query =
+                scheduler.BeginGpuWork(cmdbuf, program_hash, TraceDistribution, {1, 1, 1});
             const VkDescriptorSet distribution_set{distribution_allocator.Commit()};
             std::array<VkDescriptorBufferInfo, 4> buffer_infos{};
             std::array<VkWriteDescriptorSet, 4> writes{};
@@ -976,14 +984,17 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
                                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_HOST_BIT);
+            scheduler.EndGpuWork(cmdbuf, distribution_query);
             // 3. The mesh workgroups, as many as the tasks asked for (up to the arena's end).
+            // Indirect: the mesh workgroup count is not known here.
+            const auto mesh_query = scheduler.BeginGpuWork(cmdbuf, program_hash, TraceMesh, {});
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
             bind_program_state();
             cmdbuf.DispatchIndirect(task_buffers[2].buffer, task_buffers[2].offset);
             memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
-            scheduler.EndGpuWork(cmdbuf, trace_query);
+            scheduler.EndGpuWork(cmdbuf, mesh_query);
         });
     }
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
