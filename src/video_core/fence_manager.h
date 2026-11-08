@@ -25,6 +25,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -106,6 +107,7 @@ public:
             }
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
+            uncommitted_operations.reserve(64);
         }
         pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
@@ -216,6 +218,7 @@ private:
                     return;
                 }
             }
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
@@ -247,7 +250,7 @@ private:
         }();
         struct Released {
             TFence fence;
-            std::deque<std::function<void()>> operations;
+            OperationList operations;
             u8 flushes;
         };
         std::vector<Released> batch;
@@ -278,6 +281,9 @@ private:
                     take_front();
                 }
             }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
+            }
             size_t texture_pops = 0;
             size_t buffer_pops = 0;
             for (const Released& released : batch) {
@@ -302,6 +308,9 @@ private:
                 for (auto& operation : released.operations) {
                     operation();
                 }
+            }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             }
             {
                 std::unique_lock lock(ring_guard);
@@ -391,8 +400,11 @@ private:
     }
 
     std::queue<TFence> fences;
-    std::deque<std::function<void()>> uncommitted_operations;
-    std::deque<std::deque<std::function<void()>>> pending_operations;
+    // Vectors, not deques: MSVC's deque of std::function holds one element per block, so every
+    // queued operation (one per query report, about 1000 a frame in busy scenes) allocated a block.
+    using OperationList = std::vector<std::function<void()>>;
+    OperationList uncommitted_operations;
+    std::deque<OperationList> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
 
