@@ -904,6 +904,21 @@ bool TextureCache<P>::RescaleRenderTargets() {
     return rescaled;
 }
 
+// A draw that leaves depth and stencil alone does not modify the depth buffer. Counting it as a
+// modification made every texture aliasing that buffer copy it again: Ocarina of Time samples its
+// 854x480 depth between draws into the 864x480 one with depth writes off, ~90 copies a frame in
+// Kokiri Forest, each ending the render pass.
+template <class P>
+bool TextureCache<P>::WritesDepthStencil() const {
+    const auto& regs = maxwell3d->regs;
+    if (regs.depth_write_enabled != 0) {
+        return true;
+    }
+    return regs.stencil_enable != 0 &&
+           (regs.stencil_front_mask != 0 ||
+            (regs.stencil_two_side_enable != 0 && regs.stencil_back_mask != 0));
+}
+
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
@@ -921,7 +936,8 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
             PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        PrepareImageView(depth_buffer_id, is_clear || WritesDepthStencil(),
+                         is_clear && IsFullClear(depth_buffer_id));
         return;
     }
 
@@ -939,7 +955,8 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
 
-    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+    PrepareImageView(depth_buffer_id, is_clear || WritesDepthStencil(),
+                     is_clear && IsFullClear(depth_buffer_id));
 
     rt_active_mask = 0;
     rt_image_id = {};
