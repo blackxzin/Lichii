@@ -1838,6 +1838,13 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.synchronization2 = features.synchronization2.synchronization2;
     RemoveExtensionFeatureIfUnsuitable(extensions.synchronization2, features.synchronization2,
                                        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+
+    // VK_EXT_pipeline_creation_cache_control
+    extensions.pipeline_creation_cache_control =
+        features.pipeline_creation_cache_control.pipelineCreationCacheControl;
+    RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_creation_cache_control,
+                                       features.pipeline_creation_cache_control,
+                                       VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
 }
 
 void Device::SetupFamilies(VkSurfaceKHR surface) {
