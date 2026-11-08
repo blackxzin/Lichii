@@ -910,11 +910,29 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             };
             // The scheduler orders earlier compute writes only before the next render pass
             // (COMPUTE -> ALL_GRAPHICS); these dispatches run before it, and the programs read
-            // what the game's compute passes wrote (foliage instance lists, for one).
-            memory_barrier(VK_ACCESS_MEMORY_WRITE_BIT,
-                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-                           vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            // what the game's compute passes wrote (foliage instance lists, for one). The wide
+            // all-stage barrier is a full pipeline drain for every emulated draw (~57 a frame
+            // in Ocarina of Time, far more than the dispatches themselves cost on an iGPU):
+            // the mesh programs read compute output, DMA copies and fragment stores, so those
+            // three sources stay; vertex and geometry writes feeding a mesh program within the
+            // same frame would be exotic. EDEN_NX2_MESH_WIDE_BARRIER=1 restores the wide form.
+            static const bool wide_barrier{[] {
+                const char* value{std::getenv("EDEN_NX2_MESH_WIDE_BARRIER")};
+                return value != nullptr && value[0] == '1';
+            }()};
+            if (wide_barrier) {
+                memory_barrier(VK_ACCESS_MEMORY_WRITE_BIT,
+                               VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            } else {
+                memory_barrier(
+                    VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             if (!has_task) {
                 const auto mesh_query =
                     scheduler.BeginGpuWork(cmdbuf, program_hash, TraceMesh, {groups, 1, 1});
