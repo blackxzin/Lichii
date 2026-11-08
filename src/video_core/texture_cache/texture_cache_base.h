@@ -621,6 +621,9 @@ private:
     /// Find or create an image view for the depth buffer
     [[nodiscard]] ImageViewId FindDepthBuffer();
 
+    /// True when the current draw state can write the depth or stencil buffer
+    [[nodiscard]] bool WritesDepthStencil() const;
+
     /// Find or create a view for a render target with the given image parameters
     [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr);
 
@@ -636,7 +639,7 @@ private:
     /// targets were prepared for a draw, no image was modified, created or deleted since, in the
     /// same frame, and none needs an upload, alias sync or sparse backing.
     [[nodiscard]] bool RenderTargetsStillPrepared() const;
-    void NoteRenderTargetsPrepared();
+    void NoteRenderTargetsPrepared(bool depth_marked);
 
     /// Iterates over all the images in a region calling func
     template <typename Func>
@@ -758,6 +761,7 @@ private:
         u64 modification_tick = 0;
         u64 frame_tick = 0;
         u64 bindings_epoch = 0;
+        bool depth_marked = false; ///< the depth buffer got a modification mark
         std::array<ImageViewId, NUM_RT + 1> views{};
     } rt_prepared;
     u32 rt_active_mask = 0;

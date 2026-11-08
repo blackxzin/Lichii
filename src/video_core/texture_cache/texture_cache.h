@@ -1373,6 +1373,21 @@ bool TextureCache<P>::RescaleRenderTargets() {
     return rescaled;
 }
 
+// A draw that leaves depth and stencil alone does not modify the depth buffer. Counting it as a
+// modification made every texture aliasing that buffer copy it again: Ocarina of Time samples its
+// 854x480 depth between draws into the 864x480 one with depth writes off, ~90 copies a frame in
+// Kokiri Forest, each ending the render pass.
+template <class P>
+bool TextureCache<P>::WritesDepthStencil() const {
+    const auto& regs = maxwell3d->regs;
+    if (regs.depth_write_enabled != 0) {
+        return true;
+    }
+    return regs.stencil_enable != 0 &&
+           (regs.stencil_front_mask != 0 ||
+            (regs.stencil_two_side_enable != 0 && regs.stencil_back_mask != 0));
+}
+
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
@@ -1393,11 +1408,12 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
             PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        const bool depth_written = is_clear || WritesDepthStencil();
+        PrepareImageView(depth_buffer_id, depth_written, is_clear && IsFullClear(depth_buffer_id));
         if (is_clear) {
             rt_prepared.valid = false;
         } else {
-            NoteRenderTargetsPrepared();
+            NoteRenderTargetsPrepared(depth_written);
         }
         return;
     }
@@ -1417,7 +1433,8 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
 
-    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+    PrepareImageView(depth_buffer_id, is_clear || WritesDepthStencil(),
+                     is_clear && IsFullClear(depth_buffer_id));
 
     rt_active_mask = 0;
     rt_image_id = {};
@@ -1468,6 +1485,10 @@ bool TextureCache<P>::RenderTargetsStillPrepared() const {
         prepared.bindings_epoch != bindings_epoch) {
         return false;
     }
+    // A depth buffer left unmarked by a draw that could not write it needs the mark now.
+    if (!prepared.depth_marked && render_targets.depth_buffer_id && WritesDepthStencil()) {
+        return false;
+    }
     for (size_t index = 0; index <= NUM_RT; ++index) {
         const ImageViewId id =
             index < NUM_RT ? render_targets.color_buffer_ids[index] : render_targets.depth_buffer_id;
@@ -1483,7 +1504,8 @@ bool TextureCache<P>::RenderTargetsStillPrepared() const {
         }
         // What PrepareImage(is_modification, !invalidate) would act on.
         const ImageBase& image = slot_images[image_view.image_id];
-        if (False(image.flags & ImageFlagBits::GpuModified) ||
+        const bool marked = index < NUM_RT || prepared.depth_marked;
+        if ((marked && False(image.flags & ImageFlagBits::GpuModified)) ||
             True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::SparseTiles |
                                 ImageFlagBits::SparseLayers | ImageFlagBits::UnwrittenSparse)) ||
             !image.aliased_images.empty()) {
@@ -1496,9 +1518,10 @@ bool TextureCache<P>::RenderTargetsStillPrepared() const {
 }
 
 template <class P>
-void TextureCache<P>::NoteRenderTargetsPrepared() {
+void TextureCache<P>::NoteRenderTargetsPrepared(bool depth_marked) {
     auto& prepared = rt_prepared;
     prepared.valid = true;
+    prepared.depth_marked = depth_marked;
     prepared.serial = render_targets_serial;
     prepared.modification_tick = modification_tick;
     prepared.frame_tick = frame_tick;
