@@ -11,6 +11,7 @@
 #include "core/file_sys/errors.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_storage.h"
+#include "core/hle/service/filesystem/fsp/fs_read_trace.h"
 
 namespace Service::FileSystem {
 
@@ -44,6 +45,7 @@ Result IStorage::Read(
                                               1'000'000'000 / ReadBytesPerSecond};
 
     // Read the data from the Storage backend
+    const ReadTraceScope trace{ReadTraceSource::Storage, length};
     backend->Read(out_bytes.data(), length, offset);
 
     R_SUCCEED();
