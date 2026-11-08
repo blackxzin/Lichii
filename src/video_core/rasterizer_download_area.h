@@ -14,6 +14,9 @@ struct RasterizerDownloadArea {
     /// Not preemtive, but every GPU write there has a download on its way: wait for it to land
     /// instead of flushing (Nx2Reactive::WaitLanding).
     bool wait_landing{};
+    /// GPU data for the area is downloading with a fence that has not been released: the read
+    /// waits for it (RasterizerInterface::WaitForPendingDownloads) and asks again.
+    bool wait_downloads{};
 };
 
 } // namespace VideoCore

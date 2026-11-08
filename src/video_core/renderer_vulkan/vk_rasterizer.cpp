@@ -2522,6 +2522,25 @@ bool RasterizerVulkan::QueueFlushRegion(DAddr addr, u64 size) {
     return true;
 }
 
+void RasterizerVulkan::WaitForPendingDownloads(DAddr addr, u64 size) {
+    // Bounded: a fence the host GPU never passes must not hang the reading guest thread (the
+    // caller then flushes the range instead).
+    for (u32 attempt = 0; attempt < 200; ++attempt) {
+        const u64 seen = buffer_cache.LandedDownloads();
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            if (!buffer_cache.IsDownloadInFlight(addr, size)) {
+                return;
+            }
+        }
+        // The fence's commands may wait in a deferred submission only the split's back makes.
+        if (attempt == 0 && VideoCommon::GpuSplit::Get().Active()) {
+            VideoCommon::GpuSplit::Get().RequestIdleHook();
+        }
+        buffer_cache.WaitForLandedDownloads(seen, std::chrono::milliseconds{1});
+    }
+}
+
 void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if (addr == 0 || size == 0 || False(which & VideoCommon::CacheType::BufferCache)) {
         return;
