@@ -5,12 +5,13 @@
 
 #include "video_core/renderer_vulkan/pipeline_optimization.h"
 
-TEST_CASE("Only known AMD proprietary shaders disable pipeline optimization",
+TEST_CASE("Only known shaders on AMD proprietary and RADV disable pipeline optimization",
           "[video_core][vulkan][pipeline_optimization]") {
     constexpr std::array<u64, 2> hashes{0xeff3ccbe1438679dULL, 0xf9ea14a22394f5b1ULL};
     for (const u64 hash : hashes) {
         CHECK(Vulkan::BuildsUnoptimized(VK_DRIVER_ID_AMD_PROPRIETARY, hash));
-        for (const auto driver : {VK_DRIVER_ID_AMD_OPEN_SOURCE, VK_DRIVER_ID_MESA_RADV,
+        CHECK(Vulkan::BuildsUnoptimized(VK_DRIVER_ID_MESA_RADV, hash));
+        for (const auto driver : {VK_DRIVER_ID_AMD_OPEN_SOURCE,
                                   VK_DRIVER_ID_NVIDIA_PROPRIETARY,
                                   VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS,
                                   VK_DRIVER_ID_QUALCOMM_PROPRIETARY, VK_DRIVER_ID_MESA_TURNIP}) {
