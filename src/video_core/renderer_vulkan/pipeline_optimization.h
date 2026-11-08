@@ -12,12 +12,13 @@ namespace Vulkan {
 
 inline bool BuildsUnoptimized(VkDriverId driver_id, u64 shader_hash) {
     // The Legend of Zelda: Ocarina of Time (0400486024DEC000), driver 2.0.353 on an RX 6600 XT
-    static constexpr std::array<u64, 2> amd_proprietary{
+    static constexpr std::array<u64, 2> stalling_shaders{
         0xeff3ccbe1438679dULL, // compute shader built as the AV1 intro starts: 6 min (#200)
         0xf9ea14a22394f5b1ULL, // compute shader built as the AV1 intro starts: 18 min (#200)
     };
-    return driver_id == VK_DRIVER_ID_AMD_PROPRIETARY &&
-           std::ranges::find(amd_proprietary, shader_hash) != amd_proprietary.end();
+    // RADV 26.2.5 on an RX 580 had not finished either after 65 s
+    return (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_RADV) &&
+           std::ranges::find(stalling_shaders, shader_hash) != stalling_shaders.end();
 }
 
 } // namespace Vulkan
