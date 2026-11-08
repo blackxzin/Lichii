@@ -199,7 +199,6 @@ add_library(shader_recompiler STATIC
     program_header.h
     runtime_info.h
     shader_info.h
-    storage_write_extent.h
     varying_state.h)
 
 if (ENABLE_OPENGL)
