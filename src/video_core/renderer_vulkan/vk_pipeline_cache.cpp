@@ -465,6 +465,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       emission_budget{num_pipeline_workers},
       workers(num_pipeline_workers, "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background),
+      optimization_thread(1, "VkPipelineOptimizer", {}, Common::ThreadPlacement::Background),
       background_pipelines{64, 16 * 1024 * 1024, device.HasBrokenParallelShaderCompiling()} {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
@@ -746,12 +747,16 @@ bool PreloadAllPipelines() {
 PipelineCache::~PipelineCache() {
     background_pipelines.Stop();
     workers.WaitForRequests();
+    optimization_thread.RequestStop();
     serialization_thread.WaitForRequests();
     SaveUsedPipelines();
+    // Saved before waiting on the optimizer: the frontend terminates an emulation thread that
+    // takes over 10 s to stop.
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
     }
+    WaitForPipelineOptimization();
     graphics_cache.clear();
     evicted_pipelines.clear();
 }
@@ -1181,6 +1186,52 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
         vulkan_pipeline_cache.Read(&size, nullptr);
         last_cache_size.store(size, std::memory_order_relaxed);
         flush_in_flight.store(false, std::memory_order_release);
+    });
+}
+
+void PipelineCache::OnPipelineOptimization(u64 shader_hash, bool is_done) {
+    if (is_done) {
+        optimizing_shader.store(0, std::memory_order_release);
+        QueueVulkanPipelineCacheWrite();
+        return;
+    }
+    optimizing_since.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                           std::memory_order_relaxed);
+    optimizing_shader.store(shader_hash, std::memory_order_release);
+}
+
+void PipelineCache::WaitForPipelineOptimization() {
+    optimization_thread.RequestStop();
+    const u64 shader_hash{optimizing_shader.load(std::memory_order_acquire)};
+    if (shader_hash == 0) {
+        optimization_thread.WaitForRequests();
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point started{
+        Clock::duration{optimizing_since.load(std::memory_order_relaxed)}};
+    const Clock::time_point wait_begin{Clock::now()};
+    LOG_WARNING(Render_Vulkan,
+                "Closing waits for the optimized build of compute shader {:016X}, running for "
+                "{:.0f} s: the driver cannot interrupt it",
+                shader_hash, std::chrono::duration<double>(wait_begin - started).count());
+    optimization_thread.WaitForRequests();
+    serialization_thread.WaitForRequests();
+    LOG_WARNING(Render_Vulkan,
+                "Optimized build of compute shader {:016X} ended after a {:.1f} s wait",
+                shader_hash, std::chrono::duration<double>(Clock::now() - wait_begin).count());
+}
+
+void PipelineCache::QueueVulkanPipelineCacheWrite() {
+    if (!use_vulkan_pipeline_cache || vulkan_pipeline_cache_filename.empty()) {
+        return;
+    }
+    serialization_thread.QueueWork([this] {
+        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                     CACHE_VERSION);
+        size_t size = 0;
+        vulkan_pipeline_cache.Read(&size, nullptr);
+        last_cache_size.store(size, std::memory_order_relaxed);
     });
 }
 
@@ -2078,8 +2129,9 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return {.pipeline = std::make_unique<ComputePipeline>(
                 device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
-                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
-                std::move(spv_module), key.unique_hash),
+                descriptor_buffer_ring, thread_worker, &optimization_thread,
+                [this](u64 shader, bool is_done) { OnPipelineOptimization(shader, is_done); },
+                statistics, &shader_notify, program.info, std::move(spv_module), key.unique_hash),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},
             .mapped_pointers =
