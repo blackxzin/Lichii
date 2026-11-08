@@ -41,7 +41,8 @@ Branch `amd/oot-rx580`: Ocarina of Time (`0400486024DEC000`) on a Polaris GPU wi
 | `a15151ef32`, `77233e8663`, `4c36472f26`, `a05c983d3c`, `e446b43601` | Ports of #699, #700, #718, #715, #752 |
 | `8aa88353f5` | Enable `pipelineCreationCacheControl` when available |
 | `4425110679` | "Occlusion Off" as an opt-in built-in patch (`EDEN_NX2_OCCLUSION_OFF=1`) |
-| `4677d5b771` | `EDEN_DKB_FRAME_TRACE` also reports GPU time outside draws and dispatches |
+| `4677d5b771`, `9b2bf8b11f`, `ac826e8613`, `3de8f49798` | `EDEN_DKB_FRAME_TRACE` also reports GPU time outside draws and dispatches, the call that ended each render pass, emulated mesh steps and image copies |
+| `57dc35e6c0` | Create colour images without DCC on RADV before GFX10: Lichii keeps images in `GENERAL`, where pre-GFX10 RADV never compresses, but every copy back from `TRANSFER_*` decompressed the whole image |
 
 ## Results
 
@@ -49,9 +50,9 @@ Branch `amd/oot-rx580`: Ocarina of Time (`0400486024DEC000`) on a Polaris GPU wi
 |---|---|---|
 | Title screen | ~10 fps | 30 fps (locked) |
 | Intro cutscene | stalls minutes compiling | 30 fps |
-| Kokiri Forest gameplay | ~7 fps | 8 to 17 fps |
+| Kokiri Forest gameplay (centre) | ~9.5 fps | 13.8 fps |
 
-In gameplay the GPU is fully busy while the game already renders at 864x480 (its dynamic resolution minimum). Next step is to find where that GPU time goes.
+In gameplay the GPU is fully busy while the game renders at 864x480 (its dynamic resolution minimum). After the DCC fix a Kokiri frame takes ~75 ms on the GPU: ~26 ms of draws and game compute, ~8 to 12 ms of emulated mesh shaders (no `VK_EXT_mesh_shader` on Polaris), up to ~12 ms of depth copies between 864x480 and 854x480 aliases, and ~12 ms idle between submits.
 
 ## Known problems
 
