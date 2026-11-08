@@ -449,10 +449,6 @@ private:
     /// Find or create a view for a render target with the given image parameters
     [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr);
 
-    /// Find an image at the render target's address only narrower than it, whose width still
-    /// covers the render area
-    [[nodiscard]] ImageId FindNarrowerRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr);
-
     /// Iterates over all the images in a region calling func
     template <typename Func>
     void ForEachImageInRegion(DAddr cpu_addr, size_t size, Func&& func);
