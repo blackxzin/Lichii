@@ -658,6 +658,14 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         if (mesh_probe.pending && scheduler.IsFree(mesh_probe.tick)) {
             ReadMeshEmulationProbe();
         }
+        // A draw the game culled to zero groups does nothing: the compute lambda guards its
+        // dispatch with the same check, so skip the staging requests, the render-pass break
+        // around the dispatch, and the pass restart around a no-op draw (about 12% of Ocarina
+        // of Time's emulated draws are empty; the stats above still count them).
+        if (groups == 0) {
+            TraceRenderState(is_indexed, "mesh-emulation-empty", nullptr);
+            return;
+        }
         // EDEN_NX2_MESH_EMULATION_PROBE=1: every 60 frames, read one draw's output back (from a
         // host-visible download buffer, as device-local ones are not mapped on every GPU).
         static const bool probe{std::getenv("EDEN_NX2_MESH_EMULATION_PROBE") != nullptr};
