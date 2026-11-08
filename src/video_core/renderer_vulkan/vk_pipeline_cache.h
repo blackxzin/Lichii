@@ -182,6 +182,11 @@ private:
                                               u32 expected_cache_version);
 
     void QueueVulkanPipelineCacheFlush();
+    /// Tracks the running optimized build and saves its result (ComputePipeline on_optimization)
+    void OnPipelineOptimization(u64 shader_hash, bool is_done);
+    /// Drops the optimized builds not started yet and waits for the running one, which the driver
+    /// cannot interrupt
+    void WaitForPipelineOptimization();
 
     /// Queues one write of the driver pipeline cache file on the serialization thread, with no
     /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
@@ -273,6 +278,10 @@ private:
     std::stop_source serialization_stop;
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
+    /// Builds the optimized versions of pipelines first built unoptimized (BuildsUnoptimized)
+    Common::ThreadWorker optimization_thread;
+    std::atomic<u64> optimizing_shader{}; ///< Hash of the running optimized build, 0 when none
+    std::atomic<std::chrono::steady_clock::rep> optimizing_since{};
     DynamicFeatures dynamic_features;
     PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
 };

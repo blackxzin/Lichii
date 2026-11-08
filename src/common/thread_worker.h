@@ -121,6 +121,13 @@ public:
         return true;
     }
 
+    /// Stops the workers after the task each is running; the queued ones are dropped
+    void RequestStop() {
+        for (auto& thread : threads) {
+            thread.request_stop();
+        }
+    }
+
     void WaitForRequests(std::stop_token stop_token = {}) {
         std::stop_callback callback(stop_token, [this] {
             for (auto& thread : threads) {

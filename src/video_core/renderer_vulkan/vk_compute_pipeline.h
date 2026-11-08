@@ -42,6 +42,8 @@ public:
                              GuestDescriptorQueue& guest_descriptor_queue,
                              DescriptorBufferRing& descriptor_buffer_ring,
                              Common::ThreadWorker* thread_worker,
+                             Common::ThreadWorker* optimization_worker,
+                             std::function<void(u64, bool)> on_optimization,
                              PipelineStatistics* pipeline_statistics,
                              VideoCore::ShaderNotify* shader_notify, const Shader::Info& info,
                              vk::ShaderModule spv_module, u64 shader_hash);
@@ -93,12 +95,25 @@ public:
 
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
-        return build_task_done.load(std::memory_order::acquire);
+        return build_task_done.load(std::memory_order::acquire) &&
+               optimization_task_done.load(std::memory_order::acquire);
     }
 
 private:
     /// Builds the pipeline once, on whichever thread gets here first.
     void RunBuild();
+
+    /// Creates the Vulkan pipeline with the given extra creation flags.
+    [[nodiscard]] vk::Pipeline CreatePipeline(VkPipelineCreateFlags extra_flags);
+
+    /// The optimized pipeline when the driver has it cached, else a null handle.
+    [[nodiscard]] vk::Pipeline CreateCachedOptimizedPipeline();
+
+    /// Builds the optimized pipeline on the optimization worker, to replace the unoptimized one.
+    void QueueOptimizedBuild();
+
+    /// Swaps in a finished optimized pipeline and frees the replaced one once the GPU is done.
+    void UpdateOptimizedPipeline(Scheduler& scheduler);
 
     const Device& device;
     vk::PipelineCache& pipeline_cache;
@@ -135,6 +150,18 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+
+    Common::ThreadWorker* optimization_worker{};
+    /// Called on the optimization worker with the shader hash as the optimized build starts
+    /// (false) and once it is over (true), when a success is in the driver cache
+    std::function<void(u64, bool)> on_optimization;
+    vk::Pipeline optimized_pipeline;   ///< Written by the optimization worker
+    vk::Pipeline replaced_pipeline;    ///< Written by the scheduler thread when it swaps
+    std::atomic_bool optimized_ready{false};
+    std::atomic_bool optimization_task_done{true};
+    std::atomic_bool swapped{false};
+    bool swap_recorded{false};
+    u64 swap_tick{};
 };
 
 } // namespace Vulkan
