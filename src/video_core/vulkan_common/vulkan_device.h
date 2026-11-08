@@ -50,6 +50,8 @@ VK_DEFINE_HANDLE(VmaPool)
     FEATURE(EXT, ShaderDemoteToHelperInvocation, SHADER_DEMOTE_TO_HELPER_INVOCATION,               \
             shader_demote_to_helper_invocation)                                                    \
     FEATURE(EXT, SubgroupSizeControl, SUBGROUP_SIZE_CONTROL, subgroup_size_control)                \
+    FEATURE(EXT, PipelineCreationCacheControl, PIPELINE_CREATION_CACHE_CONTROL,                    \
+            pipeline_creation_cache_control)                                                       \
     FEATURE(KHR, Maintenance4, MAINTENANCE_4, maintenance4)                                        \
     FEATURE(KHR, Synchronization2, SYNCHRONIZATION_2, synchronization2)
 
@@ -1017,6 +1019,11 @@ FN_MAX_LIMIT_LIST
     /// Returns true if the device supports VK_KHR_synchronization2.
     bool HasSynchronization2() const {
         return extensions.synchronization2;
+    }
+
+    /// Returns true if pipelines can be created only when the pipeline cache already holds them.
+    bool HasPipelineCreationCacheControl() const {
+        return extensions.pipeline_creation_cache_control;
     }
 
     /// Returns the minimum supported version of SPIR-V.
