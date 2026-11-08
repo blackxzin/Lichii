@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <queue>
@@ -88,9 +89,15 @@ public:
     template <typename Func>
     void TraceGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
                       std::array<u32, 3> size, Func&& work) {
+        const std::optional<u32> query = BeginGpuWork(cmdbuf, hash, fragment_hash, size);
+        work();
+        EndGpuWork(cmdbuf, query);
+    }
+    /// The same, around work recorded in several steps; returns the query EndGpuWork takes.
+    std::optional<u32> BeginGpuWork(vk::CommandBuffer cmdbuf, u64 hash, u64 fragment_hash,
+                                    std::array<u32, 3> size) {
         if (!trace_gpu_recording || !trace_work_pool || trace_work_count == TraceMaxWork) {
-            work();
-            return;
+            return std::nullopt;
         }
         const u32 query = trace_work_count * 2;
         trace_work_items[trace_work_count++] = {hash,
@@ -102,8 +109,13 @@ public:
                                                 trace_end_file,
                                                 trace_end_line};
         cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query);
-        work();
-        cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool, query + 1);
+        return query;
+    }
+    void EndGpuWork(vk::CommandBuffer cmdbuf, std::optional<u32> query) {
+        if (query) {
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_work_pool,
+                                  *query + 1);
+        }
     }
 
     /// Sends currently recorded work to the worker thread.

@@ -866,6 +866,12 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 (has_task && (!task_compute_pipeline || !distribution_pipeline))) {
                 return;
             }
+            // EDEN_DKB_FRAME_TRACE times the emulated task and mesh programs as one dispatch,
+            // labelled with the program's hash and no fragment hash, apart from the draw.
+            const auto hashes = std::span{key.unique_hashes}.first(5);
+            const auto program = std::ranges::find_if(hashes, [](u64 hash) { return hash != 0; });
+            const std::optional<u32> trace_query = scheduler.BeginGpuWork(
+                cmdbuf, program != hashes.end() ? *program : 0, 0, {groups, 1, 1});
             const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
             device.GetLogical().UpdateDescriptorSet(descriptor_set, *descriptor_update_template,
                                                     descriptor_data);
@@ -913,6 +919,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+                scheduler.EndGpuWork(cmdbuf, trace_query);
                 return;
             }
             // 1. One task workgroup per draw group writes its payload (mesh workgroup count at
@@ -976,6 +983,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+            scheduler.EndGpuWork(cmdbuf, trace_query);
         });
     }
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());

@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <optional>
+#include <map>
+#include <mutex>
 #include <set>
 #include <span>
 #include <tuple>
@@ -42,6 +44,7 @@
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/formatter.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/dlss_contract.h"
@@ -2542,8 +2545,44 @@ bool TextureCacheRuntime::IsFormatScalable(PixelFormat format) {
     }
 }
 
+namespace {
+// EDEN_NX2_GPU_PROFILE: the image copies a second by formats and sizes, every 10 s (the texture
+// cache copies between images that alias the same guest memory each time one is used).
+void CountImageCopy(const Image& dst, const Image& src) {
+    static std::mutex mutex;
+    static std::map<std::string, u64> counts;
+    static u64 window_start{};
+    const u64 now = VideoCommon::Nx2Profile::Now();
+    std::scoped_lock lock{mutex};
+    ++counts[fmt::format("{} {}x{} -> {} {}x{}", src.info.format, src.info.size.width,
+                         src.info.size.height, dst.info.format, dst.info.size.width,
+                         dst.info.size.height)];
+    if (window_start == 0) {
+        window_start = now;
+    }
+    if (now - window_start < 10'000'000'000ULL) {
+        return;
+    }
+    const double seconds = static_cast<double>(now - window_start) / 1e9;
+    std::vector<std::pair<u64, std::string>> sorted;
+    for (const auto& [copy, count] : counts) {
+        sorted.emplace_back(count, copy);
+    }
+    std::ranges::sort(sorted, std::greater<>{});
+    for (size_t i = 0; i < sorted.size() && i < 12; ++i) {
+        LOG_INFO(Render_Vulkan, "Image copies {:.0f}/s: {}",
+                 static_cast<double>(sorted[i].first) / seconds, sorted[i].second);
+    }
+    counts.clear();
+    window_start = now;
+}
+} // Anonymous namespace
+
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                                     std::span<const VideoCommon::ImageCopy> copies) {
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        CountImageCopy(dst, src);
+    }
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
         InvalidateResolveShadow(dst.Handle());
     }
