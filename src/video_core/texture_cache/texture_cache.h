@@ -698,17 +698,10 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
                     continue;
             }
 
-            const ImageId view_image_id = slot_image_views[view.id].image_id;
-            // The game samples the narrower depth image it declared while drawing to the wider
-            // one, which were separate images synchronized by a copy before. Now it is the bound
-            // depth buffer, so depth written earlier in the pass needs the barrier.
-            if (depth_active && view_image_id == rt_depth_image_id &&
-                view_image_id == narrowed_depth_image) {
-                return true;
-            }
             if (depth_active && view.id == render_targets.depth_buffer_id)
                 continue;
 
+            const ImageId view_image_id = slot_image_views[view.id].image_id;
             {
                 bool is_continue = false;
                 for (size_t i = 0; i < 8; ++i)
@@ -858,7 +851,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
             }
             check_rescale(color_buffer_id, tmp_color_images[index]);
         }
-        if (flags[Dirty::ZetaBuffer] || force || NarrowedDepthBufferTooNarrow()) {
+        if (flags[Dirty::ZetaBuffer] || force) {
             flags[Dirty::ZetaBuffer] = false;
             BindRenderTarget(&render_targets.depth_buffer_id, FindDepthBuffer());
         }
@@ -3299,8 +3292,7 @@ template <class P>
 ImageId TextureCache<P>::FindNarrowerRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
     const auto& clip = maxwell3d->regs.surface_clip;
     const u32 render_width = clip.x + clip.width;
-    if (GetFormatType(info.format) == SurfaceType::ColorTexture ||
-        info.type != ImageType::e2D || info.resources.levels != 1 ||
+    if (info.type != ImageType::e2D || info.resources.levels != 1 ||
         info.resources.layers != 1 || render_width >= info.size.width ||
         Settings::values.resolution_info.active) {
         return ImageId{};
@@ -3324,23 +3316,7 @@ ImageId TextureCache<P>::FindNarrowerRenderTarget(const ImageInfo& info, GPUVAdd
         narrower = image_id;
         return true;
     });
-    if (narrower) {
-        narrowed_depth_image = narrower;
-    }
     return narrower;
-}
-
-// A surface clip change does not rebind the depth buffer, so a narrower one bound for an earlier
-// clip is looked up again once the render area outgrows it.
-template <class P>
-bool TextureCache<P>::NarrowedDepthBufferTooNarrow() const {
-    const ImageViewId view_id = render_targets.depth_buffer_id;
-    if (!narrowed_depth_image || !view_id || view_id == NULL_IMAGE_VIEW_ID ||
-        slot_image_views[view_id].image_id != narrowed_depth_image) {
-        return false;
-    }
-    const auto& clip = maxwell3d->regs.surface_clip;
-    return clip.x + clip.width > slot_images[narrowed_depth_image].info.size.width;
 }
 
 template <class P>
