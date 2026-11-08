@@ -1581,9 +1581,13 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     if (is_native_bank && bank_streamed) {
         Nx2BufCache::Note(Nx2BufCache::Stat::BankSkip);
     }
+    // Ocarina of Time is left out (unless EDEN_NX2_PERF_VERIFY=1): a compare of its banks against
+    // shadow copies found no page changed behind the tracker, and the uploads cost frame rate.
+    constexpr u64 ocarina_of_time = 0x0400486024DEC000ULL;
+    const bool bank_recheck = program_id != ocarina_of_time || Nx2Perf::Verify();
     const auto upload_bank = [&] {
-        if (!(is_native_bank && !bank_streamed && size != 0 && gpu_memory != nullptr &&
-              gpu_memory->UsesNativeTiling() &&
+        if (!(bank_recheck && is_native_bank && !bank_streamed && size != 0 &&
+              gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
               (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
               !memory_tracker.IsRegionGpuModified(device_addr, size) &&
               native_indirect_uniforms_this_frame.insert(device_addr))) {
