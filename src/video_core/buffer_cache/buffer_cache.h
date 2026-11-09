@@ -113,6 +113,9 @@ void BufferCache<P>::TickFrame() {
         return;
     }
     runtime.TickFrame(slot_buffers);
+    // A page left protected while CPU-dirty makes the guest's writes take the slow path: at most
+    // until here (EDEN_NX2_DEFER_UNPROTECT).
+    memory_tracker.FlushDeferredUnprotects();
     native_indirect_uniforms_this_frame.clear();
     bank_pages_this_frame.clear();
     Nx2BufCache::Report();

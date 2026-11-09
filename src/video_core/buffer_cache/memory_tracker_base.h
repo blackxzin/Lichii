@@ -181,6 +181,15 @@ public:
         });
     }
 
+    /// Applies the unprotects held back under g_defer_unprotect (word_manager.h).
+    void FlushDeferredUnprotects() {
+        for (Manager* const manager : top_tier) {
+            if (manager != nullptr) {
+                manager->FlushDeferredUnprotects();
+            }
+        }
+    }
+
     void FlushCachedWrites() noexcept {
         for (auto id : cached_pages) {
             top_tier[id]->FlushCachedWrites();

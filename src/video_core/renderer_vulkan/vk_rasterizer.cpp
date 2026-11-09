@@ -2560,6 +2560,8 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
+        // The GPU's own write: its pages' unprotects may wait (EDEN_NX2_DEFER_UNPROTECT).
+        VideoCommon::DeferUnprotectScope defer_unprotect;
         buffer_cache.WriteMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
@@ -2594,6 +2596,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
+        VideoCommon::DeferUnprotectScope defer_unprotect; // As in InvalidateRegion
         for (const auto& [addr, size] : sequences) {
             buffer_cache.WriteMemory(addr, size);
         }

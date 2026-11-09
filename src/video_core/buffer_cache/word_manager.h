@@ -60,6 +60,36 @@ struct Nx2TrackerStats {
 };
 
 constexpr u64 PAGES_PER_WORD = 64;
+
+/// EDEN_NX2_DEFER_UNPROTECT (on unless 0): set on the GPU thread around its own writes to guest
+/// memory (RasterizerVulkan::InvalidateRegion), whose pages the next sync usually protects again.
+/// Their unprotects wait in the word manager: a page left protected while CPU-dirty is only
+/// slower for the guest (its writes take the notifying slow path), never stale, and the sync's
+/// protect then cancels the waiting unprotect instead of two page protection changes. What is
+/// left is applied at the end of the frame (FlushDeferredUnprotects).
+inline thread_local bool g_defer_unprotect = false;
+
+[[nodiscard]] inline bool DeferUnprotectEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DEFER_UNPROTECT");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+struct DeferUnprotectScope {
+    DeferUnprotectScope() : previous{g_defer_unprotect} {
+        g_defer_unprotect = DeferUnprotectEnabled();
+    }
+    ~DeferUnprotectScope() {
+        g_defer_unprotect = previous;
+    }
+    DeferUnprotectScope(const DeferUnprotectScope&) = delete;
+    DeferUnprotectScope& operator=(const DeferUnprotectScope&) = delete;
+
+private:
+    bool previous;
+};
 constexpr u64 BYTES_PER_PAGE = Core::DEVICE_PAGESIZE;
 constexpr u64 BYTES_PER_WORD = PAGES_PER_WORD * BYTES_PER_PAGE;
 
@@ -386,9 +416,88 @@ struct WordManager {
         });
     }
 
+    /// Applies the unprotects DeferUnprotects held back. Pages a protect cancelled are gone.
+    void FlushDeferredUnprotects() {
+        if (!has_deferred_unprotects) {
+            return;
+        }
+        has_deferred_unprotects = false;
+        const std::span<const u64> untracked_words = Span(Type::Untracked);
+        CollectedRanges ranges;
+        for (u64 word_index = 0; word_index < num_words; ++word_index) {
+            // Still unprotected in the words: only a protect clears that, and it cancels the bit.
+            const u64 bits = deferred_unprotects[word_index] & untracked_words[word_index];
+            deferred_unprotects[word_index] = 0;
+            const VAddr addr = cpu_addr + word_index * BYTES_PER_WORD;
+            IteratePages(bits, [&](size_t offset, size_t size) {
+                ranges.emplace_back(addr + offset * BYTES_PER_PAGE, size * BYTES_PER_PAGE);
+            });
+        }
+        if (!ranges.empty()) {
+            const bool defer = std::exchange(g_defer_unprotect, false);
+            ApplyCollectedRanges(ranges, -1);
+            g_defer_unprotect = defer;
+        }
+    }
+
+    /// Holds back unprotects (delta -1) under g_defer_unprotect, and drops the protects (delta 1)
+    /// of pages whose unprotect waits, with it. True when nothing is left to apply.
+    bool DeferUnprotects(CollectedRanges& ranges, int delta) const {
+        // Small writes only: a large range is a buffer rebuild, not a page rewritten per frame.
+        constexpr u64 max_deferred_pages = 16;
+        if (delta < 0) {
+            if (!g_defer_unprotect) {
+                return false;
+            }
+            u64 pages = 0;
+            for (const auto& [addr, size] : ranges) {
+                pages += size / BYTES_PER_PAGE;
+            }
+            if (pages > max_deferred_pages) {
+                return false;
+            }
+            for (const auto& [addr, size] : ranges) {
+                for (u64 page = (addr - cpu_addr) / BYTES_PER_PAGE;
+                     page < (addr + size - cpu_addr) / BYTES_PER_PAGE; ++page) {
+                    deferred_unprotects[page / PAGES_PER_WORD] |= u64{1} << (page % PAGES_PER_WORD);
+                }
+            }
+            has_deferred_unprotects = true;
+            return true;
+        }
+        if (!has_deferred_unprotects) {
+            return false;
+        }
+        CollectedRanges kept;
+        for (const auto& [addr, size] : ranges) {
+            for (u64 page = (addr - cpu_addr) / BYTES_PER_PAGE;
+                 page < (addr + size - cpu_addr) / BYTES_PER_PAGE; ++page) {
+                u64& word = deferred_unprotects[page / PAGES_PER_WORD];
+                const u64 bit = u64{1} << (page % PAGES_PER_WORD);
+                if ((word & bit) != 0) {
+                    // Still protected: the waiting unprotect and this protect cancel out.
+                    word &= ~bit;
+                    continue;
+                }
+                const VAddr page_addr = cpu_addr + page * BYTES_PER_PAGE;
+                if (!kept.empty() && kept.back().first + kept.back().second == page_addr) {
+                    kept.back().second += BYTES_PER_PAGE;
+                } else {
+                    kept.emplace_back(page_addr, BYTES_PER_PAGE);
+                }
+            }
+        }
+        ranges = std::move(kept);
+        return ranges.empty();
+    }
+
     void ApplyCollectedRanges(CollectedRanges& ranges, int delta) const {
         if (ranges.empty())
             return;
+        if (DeferUnprotects(ranges, delta)) {
+            ranges.clear();
+            return;
+        }
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         if (!Nx2Perf::Verify()) {
             VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::TrackerProtect};
@@ -546,6 +655,9 @@ struct WordManager {
     /// Bit per word, set while the word has no CPU and no Untracked page (DirtyWords). Every
     /// change to those words updates it: a per-word form of PR #161's upload_words count.
     u64 clean_words = 0;
+    /// Pages whose unprotect DeferUnprotects holds back (bit per page, as the state words).
+    mutable std::array<u64, num_words> deferred_unprotects{};
+    mutable bool has_deferred_unprotects = false;
     DeviceTracker* tracker = nullptr;
     VAddr cpu_addr = 0;
 };
