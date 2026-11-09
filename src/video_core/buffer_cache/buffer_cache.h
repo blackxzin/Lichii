@@ -3269,6 +3269,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         }
         Nx2BufCache::Note(Nx2BufCache::Stat::SyncUpload);
         Nx2BufCache::Note(Nx2BufCache::Stat::SyncUploadBytes, total_size_bytes);
+        VideoCommon::Nx2Profile::Scope upload_scope{VideoCommon::Nx2Profile::Zone::SyncUpload};
         const std::span<BufferCopy> copies_span(upload_copies.data(), upload_copies.size());
         bool uploaded = false;
         if constexpr (USE_MEMORY_MAPS && USE_MEMORY_MAPS_FOR_UPLOADS) {

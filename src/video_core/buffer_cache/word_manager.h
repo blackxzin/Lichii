@@ -23,6 +23,7 @@
 #include "common/logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
 
@@ -390,6 +391,7 @@ struct WordManager {
             return;
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         if (!Nx2Perf::Verify()) {
+            VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::TrackerProtect};
             CoalesceInPlace(ranges);
             Nx2TrackerStats::Note(ranges, delta);
             tracker->UpdatePagesCachedBatch(
