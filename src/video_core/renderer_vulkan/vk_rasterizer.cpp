@@ -476,6 +476,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                 self.write_handoff.Drain([&self](DAddr addr, u64 size) {
                     VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
                         VideoCommon::Nx2ProtectDiag::Caller::WriteHandoff};
+                    VideoCommon::DeferUnprotectScope defer_unprotect{
+                        VideoCommon::DeferGuestTrapUnprotects()};
                     if (!self.buffer_cache.OnCPUWrite(addr, size)) {
                         return;
                     }
@@ -2659,6 +2661,8 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     }
     {
         std::unique_lock lock{buffer_cache.mutex, std::adopt_lock};
+        VideoCommon::DeferUnprotectScope defer_unprotect{
+            VideoCommon::DeferGuestTrapUnprotects()};
         if (buffer_cache.OnCPUWrite(addr, size)) {
             return true;
         }
@@ -2701,6 +2705,8 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
+        VideoCommon::DeferUnprotectScope defer_unprotect{
+            VideoCommon::DeferGuestInvalidationUnprotects()};
         buffer_cache.WriteMemory(addr, size);
     }
     pipeline_cache.InvalidateRegion(addr, size);

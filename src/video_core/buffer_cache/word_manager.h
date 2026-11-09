@@ -79,9 +79,34 @@ inline thread_local bool g_defer_unprotect = false;
     return enabled;
 }
 
+/// EDEN_NX2_DEFER_UNPROTECT_INV (on unless 0): the same for the guest's collected writes to
+/// pages with GPU-written data (RasterizerVulkan::OnCacheInvalidation, applied at each fence),
+/// the most unprotects in OoT's Kokiri (~4,300 pages a second, each protected again by the next
+/// sync). The page stays protected, so the guest's later writes there are collected again until
+/// that sync, as the first one was.
+[[nodiscard]] inline bool DeferGuestInvalidationUnprotects() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DEFER_UNPROTECT_INV");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_DEFER_UNPROTECT_TRAP=1 (opt-in): the same for the guest's trapped writes
+/// (RasterizerVulkan::OnCPUWrite and the write handoff). Each later write to the page traps
+/// again (and takes the buffer cache's lock) until the sync instead of running at full speed.
+[[nodiscard]] inline bool DeferGuestTrapUnprotects() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DEFER_UNPROTECT_TRAP");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
 struct DeferUnprotectScope {
-    DeferUnprotectScope() : previous{g_defer_unprotect} {
-        g_defer_unprotect = DeferUnprotectEnabled();
+    DeferUnprotectScope() : DeferUnprotectScope{DeferUnprotectEnabled()} {}
+    explicit DeferUnprotectScope(bool enable) : previous{g_defer_unprotect} {
+        g_defer_unprotect = enable;
     }
     ~DeferUnprotectScope() {
         g_defer_unprotect = previous;
