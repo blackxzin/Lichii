@@ -683,7 +683,7 @@ void DmaPusher::NoteBackWrites(const BackWrites& writes) {
     }
 }
 
-bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
+bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size, bool by_list_writers) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.NarrowDrains()) {
         return split.WaitForWriters();
@@ -694,8 +694,8 @@ bool DmaPusher::WaitForListWriters(GPUVAddr address, size_t size) {
     // EDEN_NX2_NARROW_LIST_SYNC: the pushbuffer fetch sees what a dispatch or copy wrote only
     // after a host-level wait (GP entry sync bit, syncpoint or semaphore acquire), so the work
     // before the last one and the recorded writes over the list are enough.
-    const bool waited =
-        split.WaitForWritersTo(&memory_manager, first, last - first, split.NarrowListSync());
+    const bool waited = split.WaitForWritersTo(&memory_manager, first, last - first,
+                                               split.NarrowListSync(), by_list_writers);
     if (VideoCommon::GpuSplit::NarrowVerify()) {
         // EDEN_NX2_NARROW_VERIFY: the pages GPU-written now and after all the writers.
         const bool written = IsGpuWrittenCommands(address, size);
@@ -822,10 +822,12 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
     }
     const GPUVAddr end = address + u64{count} * sizeof(u32);
     bool written = false;
+    // A page first read as a list now: the memo learned nothing about writes to it.
+    bool new_list_page = false;
     for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < end; page += 0x1000) {
         if (const auto device = memory_manager.GpuToCpuAddress(page);
             device && Tegra::Nx2IsGpuWritten(*device)) {
-            Tegra::Nx2MarkCommandListPage(*device);
+            new_list_page |= Tegra::Nx2MarkCommandListPage(*device);
             written = true;
         }
     }
@@ -833,12 +835,19 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pendin
         return false;
     }
     auto& split = VideoCommon::GpuSplit::Get();
+    if (new_list_page && split.Active()) {
+        // Dispatches queued so far were judged without this page: later lists wait for them.
+        split.NoteListWriter();
+    }
     // Resuming after the copy's tick: the back ran the list's writer before the suspension
     // (this wait ran then), and waiting again would wait for the other channels' work queued
     // meanwhile too.
     const bool resumed = std::exchange(resumed_list_read, false);
     if (split.Active() && !resumed) {
-        WaitForListWriters(address, size_t{count} * sizeof(u32));
+        const bool by_list_writers =
+            Tegra::Nx2ListWriterMemo::Enabled() && !new_list_page &&
+            !Tegra::Nx2ListWriterMemo::g_draw_written.load(std::memory_order_relaxed);
+        WaitForListWriters(address, size_t{count} * sizeof(u32), by_list_writers);
     }
     bool past_sync = !split.Active();
     using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;

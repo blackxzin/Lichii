@@ -2804,6 +2804,7 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
             }
             if (word & 1) {
                 const DAddr page_addr = page << page_bits;
+                Tegra::Nx2ListWriterMemo::NoteListWrite(nx2_collect_list_copies);
                 {
                     std::scoped_lock lock{nx2_list_mutex};
                     Nx2ListPage& entry = nx2_list_pages[page_addr];

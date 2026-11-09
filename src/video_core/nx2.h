@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -14,6 +15,7 @@
 
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 
 namespace Tegra {
 
@@ -66,19 +68,129 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
 // the split and flushing the caches (BufferCache::Nx2ReadListCopy).
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_command_list_pages{};
 inline std::atomic<bool> g_nx2_has_command_list_pages{false};
+/// Bumped each time a page becomes a command list page (or all are cleared): what
+/// Nx2ListWriterMemo learned before says nothing about writes to the new page.
+inline std::atomic<u64> g_nx2_list_page_epoch{0};
 
-inline void Nx2MarkCommandListPage(u64 device_address) {
+/// Whether the page was not a command list page before.
+inline bool Nx2MarkCommandListPage(u64 device_address) {
     const u64 page = device_address >> Nx2WrittenPageBits;
     if (page >= g_nx2_command_list_pages.size() * 64) {
-        return;
+        return false;
     }
     auto& word = g_nx2_command_list_pages[page / 64];
     const u64 bit = u64{1} << (page % 64);
-    if ((word.load(std::memory_order_relaxed) & bit) == 0) {
-        word.fetch_or(bit, std::memory_order_relaxed);
-        g_nx2_has_command_list_pages.store(true, std::memory_order_relaxed);
+    if ((word.load(std::memory_order_relaxed) & bit) != 0) {
+        return false;
+    }
+    // Epoch first: a dispatch learned clean before this page counted is not clean for it.
+    g_nx2_list_page_epoch.fetch_add(1, std::memory_order_seq_cst);
+    word.fetch_or(bit, std::memory_order_seq_cst);
+    g_nx2_has_command_list_pages.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+// EDEN_NX2_LIST_WRITER_MEMO (on unless 0): which compute programs (by code address) write
+// command list pages. With EDEN_NX2_NARROW_LIST_SYNC a list on GPU-written pages waits for all
+// the work before the last host sync (~1.1 ms each, 120 a second in Ocarina's Kokiri), though
+// only the dispatches and copies that write list pages matter. The back learns, per program,
+// whether its dispatches wrote a list page (BufferCache::Nx2NoteListWrite runs within the
+// dispatch); one that ran CleanRuns times since the last new list page without writing one
+// doesn't hold list reads (GpuSplit::NoteComputeGrid). Draws are not tracked: once a list page
+// is written outside dispatches and copies, lists wait for the sync again. A learned program
+// that writes a list page later is logged (its list read may have been early).
+namespace Nx2ListWriterMemo {
+
+inline constexpr u32 CleanRuns = 64;
+inline constexpr u32 MaxRuns = 2047;
+inline constexpr size_t Slots = 4096;
+// Each slot: key tag (40 bits) | epoch (12) | clean runs (11) | writer (1), one atomic so the
+// front never sees one program's runs under another's tag.
+inline std::array<std::atomic<u64>, Slots> g_slots{};
+inline std::atomic<bool> g_draw_written{false};
+inline thread_local bool t_in_dispatch = false;
+inline thread_local bool t_wrote = false;
+
+[[nodiscard]] inline bool Enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LIST_WRITER_MEMO");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+[[nodiscard]] inline size_t SlotIndex(u64 key) {
+    return static_cast<size_t>((key * 0x9E3779B97F4A7C15ULL) >> 52);
+}
+
+[[nodiscard]] inline u64 Tag(u64 key) {
+    const u64 mixed = (key ^ (key >> 29)) * 0xBF58476D1CE4E5B9ULL;
+    return mixed >> 24;
+}
+
+[[nodiscard]] inline u64 Epoch() {
+    return g_nx2_list_page_epoch.load(std::memory_order_seq_cst) & 0xfff;
+}
+
+/// Front: whether `key`'s dispatches are known not to write command list pages.
+[[nodiscard]] inline bool IsClean(u64 key) {
+    if (!Enabled() || g_draw_written.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    const u64 state = g_slots[SlotIndex(key)].load(std::memory_order_acquire);
+    return (state >> 24) == Tag(key) && ((state >> 12) & 0xfff) == Epoch() &&
+           (state & 1) == 0 && ((state >> 1) & 0x7ff) >= CleanRuns;
+}
+
+/// Back: a dispatch of `key` runs while this lives.
+struct DispatchScope {
+    explicit DispatchScope(u64 key_) : key{key_} {
+        t_in_dispatch = true;
+        t_wrote = false;
+    }
+    ~DispatchScope() {
+        t_in_dispatch = false;
+        if (!Enabled()) {
+            return;
+        }
+        const u64 epoch = Epoch();
+        auto& slot = g_slots[SlotIndex(key)];
+        const u64 state = slot.load(std::memory_order_relaxed);
+        const bool same = (state >> 24) == Tag(key) && ((state >> 12) & 0xfff) == epoch;
+        u64 runs = same ? (state >> 1) & 0x7ff : 0;
+        bool writer = same && (state & 1) != 0;
+        if (t_wrote) {
+            if (!writer && runs >= CleanRuns) {
+                LOG_WARNING(HW_GPU,
+                            "Compute program {:#x} wrote a command list page after {} dispatches "
+                            "that did not: list reads may have skipped it "
+                            "(EDEN_NX2_LIST_WRITER_MEMO)",
+                            key, runs);
+            }
+            writer = true;
+        } else if (runs < MaxRuns) {
+            ++runs;
+        }
+        slot.store((Tag(key) << 24) | (epoch << 12) | (runs << 1) | (writer ? 1 : 0),
+                   std::memory_order_release);
+    }
+    DispatchScope(const DispatchScope&) = delete;
+    DispatchScope& operator=(const DispatchScope&) = delete;
+
+private:
+    u64 key;
+};
+
+/// Back: a command list page was written (BufferCache::Nx2NoteListWrite).
+inline void NoteListWrite(bool by_dispatch_or_copy) {
+    if (t_in_dispatch) {
+        t_wrote = true;
+    } else if (!by_dispatch_or_copy) {
+        g_draw_written.store(true, std::memory_order_relaxed);
     }
 }
+
+} // namespace Nx2ListWriterMemo
 
 [[nodiscard]] inline bool Nx2IsCommandListPage(u64 device_address) {
     const u64 page = device_address >> Nx2WrittenPageBits;
@@ -97,6 +209,7 @@ inline void Nx2ClearGpuWrittenPages() {
         word.store(0, std::memory_order_relaxed);
     }
     g_nx2_has_command_list_pages.store(false, std::memory_order_relaxed);
+    g_nx2_list_page_epoch.fetch_add(1, std::memory_order_seq_cst);
 }
 
 [[nodiscard]] inline bool Nx2IsGpuWritten(u64 device_address) {

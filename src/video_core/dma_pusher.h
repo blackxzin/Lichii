@@ -221,7 +221,8 @@ private:
                                u32 method, const u32* arguments, u32 count);
     void NoteBackWrites(const BackWrites& writes);
     /// GpuSplit::WaitForWriters for a command list's pages (narrowed with the narrow drains).
-    bool WaitForListWriters(GPUVAddr address, size_t size);
+    /// `by_list_writers`: Tegra::Nx2ListWriterMemo may narrow the wait.
+    bool WaitForListWriters(GPUVAddr address, size_t size, bool by_list_writers = false);
     /// WaitForListWriters for a list on pages the GPU never wrote (EDEN_NX2_LIST_EXACT).
     bool WaitForListFetch(GPUVAddr address, size_t size);
     /// Marks the list's pages as read from; whether all of them were before.

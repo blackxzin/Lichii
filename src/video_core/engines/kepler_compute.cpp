@@ -966,6 +966,8 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     }
     bool dispatched = true;
     try {
+        const Tegra::Nx2ListWriterMemo::DispatchScope memo_scope{
+            (u64{qmd[49] & 0x1ffff} << 32) | qmd[48]};
         rasterizer->DispatchCompute();
     } catch (const VideoCommon::FireEmblemUpscale::DispatchReplaced&) {
         return true;
@@ -2127,6 +2129,7 @@ bool KeplerCompute::FrontQmdSignal(VideoCommon::GpuSplit& split, GPUVAddr qmd_ad
     }
     bool unknown = false;
     bool grid = false;
+    bool may_write_lists = false;
     const auto read = [&](u64 address, NativeQmdScheduler::Descriptor& descriptor) {
         return FrontReadQmd(split, address, descriptor, unknown);
     };
@@ -2147,17 +2150,21 @@ bool KeplerCompute::FrontQmdSignal(VideoCommon::GpuSplit& split, GPUVAddr qmd_ad
         }
         return true;
     };
-    const auto dispatch = [&](const NativeQmdScheduler::Descriptor&) {
+    const auto dispatch = [&](const NativeQmdScheduler::Descriptor& qmd) {
         grid = true;
+        // The key DispatchNativeCompute learns under: the program's code address.
+        may_write_lists |=
+            !Tegra::Nx2ListWriterMemo::IsClean((u64{qmd[49] & 0x1ffff} << 32) | qmd[48]);
         return true;
     };
     (void)mirror.scheduler.Signal(qmd_address, argument, read, release, dispatch);
     if (unknown) {
         // The back's run of this signal may differ from the copy's: take its table.
         ResyncFrontQmd(split);
+        split.NoteListWriter();
         ++mirror.window_resyncs;
     } else if (grid) {
-        split.NoteComputeGrid();
+        split.NoteComputeGrid(may_write_lists);
     }
     // QMDs the front only reads after waiting for the back (written by queued copies or
     // uploads other than inline QMDs) or on GPU-written pages (each a drain) would make

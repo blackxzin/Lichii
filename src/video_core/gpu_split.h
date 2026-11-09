@@ -342,6 +342,12 @@ public:
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
         last_writer_position = write_position;
+        list_writer_position = write_position;
+    }
+    /// The work just sent may write command list pages where the front can't bound it
+    /// (Tegra::Nx2ListWriterMemo). Everything that may write memory unbounded notes it too.
+    void NoteListWriter() {
+        list_writer_position = write_position;
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
@@ -415,6 +421,9 @@ public:
             if (writer) {
                 unbounded_writer_position = write_position;
             }
+            if (!BarrierOnly(cause) || cause == UnboundedCause::ComputeLaunch) {
+                list_writer_position = write_position;
+            }
         }
     }
     /// A compute dispatch was just sent. EDEN_NX2_NARROW_COMPUTE: the front end runs MME DMA
@@ -430,6 +439,7 @@ public:
         }
         acquire_position = write_position;
         unbounded_writer_position = write_position;
+        list_writer_position = write_position;
     }
     /// Unbounded writes that write no guest memory themselves on the back: barriers, and
     /// dispatches, whose shader stores go to the host GPU's copies (GuestReadTarget).
@@ -456,11 +466,16 @@ public:
     /// EDEN_NX2_QMD_PREDICT: a QMD with a grid ran in the work just sent. Its releases were
     /// noted; its shader stores hold command list reads and, without EDEN_NX2_ACQUIRE_POLL
     /// (whose polled reads already don't wait for them), semaphore acquires.
-    void NoteComputeGrid() {
+    /// `may_write_lists`: false when every grid's program is known not to write command list
+    /// pages (Tegra::Nx2ListWriterMemo).
+    void NoteComputeGrid(bool may_write_lists = true) {
         if (!narrow) {
             return;
         }
         unbounded_writer_position = write_position;
+        if (may_write_lists) {
+            list_writer_position = write_position;
+        }
         if (!acquire_poll) {
             acquire_position = write_position;
         }
@@ -564,7 +579,10 @@ public:
     /// with unbounded writes, and the queued writes overlapping the list. `sync_only`
     /// (EDEN_NX2_NARROW_LIST_SYNC): the work before the last host-level wait instead of every
     /// dispatch and copy.
-    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only = false);
+    /// `by_list_writers` (with `sync_only`): only the work before the last sync that may write
+    /// command list pages (NoteListWriter) counts, not all of it (Tegra::Nx2ListWriterMemo).
+    bool WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only = false,
+                          bool by_list_writers = false);
 
 private:
     friend struct GpuSplitTestAccess;
@@ -732,6 +750,7 @@ private:
     /// Narrow drains: the end of the latest work with unbounded writes (of compute or copy work).
     u64 unbounded_position{};
     u64 unbounded_writer_position{};
+    u64 list_writer_position{};
     /// Unbounded writes and dispatches (semaphore acquires wait for those).
     u64 acquire_position{};
     /// The latest pending write slot that gave way (every narrowed read waits for it).

@@ -332,6 +332,7 @@ void GpuSplit::Stop() {
     gpu_semaphore_saturated.store(false, std::memory_order_relaxed);
     unbounded_position = 0;
     unbounded_writer_position = 0;
+    list_writer_position = 0;
     acquire_position = 0;
     write_floor = 0;
     guest_write_position = 0;
@@ -802,10 +803,14 @@ bool GpuSplit::WaitForWritesTo(const void* space, GPUVAddr address, u64 size, Dr
     return WaitFor((std::min)(target, write_position), site);
 }
 
-bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only) {
+bool GpuSplit::WaitForWritersTo(const void* space, GPUVAddr address, u64 size, bool sync_only,
+                                bool by_list_writers) {
     RunPendingFlush(); // As in WaitForWritesTo
     consumed_cache = consumed.load(std::memory_order_acquire);
-    const u64 base = sync_only ? last_sync_position : unbounded_writer_position;
+    u64 base = sync_only ? last_sync_position : unbounded_writer_position;
+    if (sync_only && by_list_writers) {
+        base = (std::min)(base, list_writer_position);
+    }
     const u64 target = PendingWriteTarget(space, address, size, base);
     return WaitFor((std::min)(target, write_position), DrainSite::NarrowListWriters);
 }
