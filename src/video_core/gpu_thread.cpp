@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 #ifdef __linux__
@@ -44,6 +45,15 @@ void SignalCommand(SynchState& state, u64 fence, bool block) {
     }
 }
 
+// EDEN_NX2_PENDING_SPIN_US / EDEN_NX2_PENDING_SLEEP_US (A/B): how long a pending-channel wait
+// yields before it sleeps (default 500 us), and each sleep (default 50 us; Linux only, Windows
+// sleeps one timer tick). The yields keep a host thread busy, which a guest CPU thread that is
+// about to release the semaphore may share a core with.
+std::chrono::microseconds PendingWaitSwitch(const char* name, u32 fallback) {
+    const char* const value = std::getenv(name);
+    return std::chrono::microseconds{value ? std::strtoul(value, nullptr, 10) : fallback};
+}
+
 } // Anonymous namespace
 
 ThreadManager::ThreadManager(Core::System& system_)
@@ -76,6 +86,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto last_progress = std::chrono::steady_clock::now();
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
+        const auto pending_spin = PendingWaitSwitch("EDEN_NX2_PENDING_SPIN_US", 500);
+        [[maybe_unused]] const auto pending_sleep =
+            PendingWaitSwitch("EDEN_NX2_PENDING_SLEEP_US", 50);
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
@@ -105,7 +118,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     // still waiting after 2 s (menus, loading) goes back to 1 ms sleeps.
                     Profile::Scope scope{Profile::Zone::PendingSleep};
                     const auto waited = std::chrono::steady_clock::now() - last_progress;
-                    if (waited < std::chrono::microseconds{500}) {
+                    if (waited < pending_spin) {
                         std::this_thread::yield();
                     } else if (waited < std::chrono::seconds{2}) {
 #ifdef _WIN32
@@ -113,7 +126,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         // SleepForOneTick uses NtDelayExecution(-1) for one high-res timer tick.
                         Common::Windows::SleepForOneTick();
 #else
-                        std::this_thread::sleep_for(std::chrono::microseconds{50});
+                        std::this_thread::sleep_for(pending_sleep);
 #endif
                     } else {
                         std::this_thread::sleep_for(std::chrono::milliseconds{1});
