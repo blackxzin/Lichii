@@ -2078,7 +2078,10 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         const u32 size = binding.size;
-        SynchronizeBuffer(buffer, binding.device_addr, size);
+        {
+            VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ChsSync};
+            SynchronizeBuffer(buffer, binding.device_addr, size);
+        }
 
         const u32 offset = buffer.Offset(binding.device_addr);
         buffer.MarkUsage(offset, size);
@@ -2594,6 +2597,9 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 
 template <class P>
 void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {
+    using VideoCommon::Nx2Profile::Scope;
+    using VideoCommon::Nx2Profile::Zone;
+    Scope mark_scope{Zone::MarkWritten};
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];
@@ -2603,24 +2609,37 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     // The downloads already taken over this range hold older bytes: when their fences pop
     // they must not write them over this write's result in guest memory, nor drop the range
     // from gpu_modified_ranges (the next fence downloads it instead).
-    for (auto& ranges : pending_download_ranges) {
-        ranges.Subtract(device_addr, size);
+    {
+        Scope scope{Zone::MarkPendingRanges};
+        for (auto& ranges : pending_download_ranges) {
+            ranges.Subtract(device_addr, size);
+        }
     }
-    memory_tracker.MarkRegionAsGpuModified(device_addr, size);
-    DemoteHotPages(device_addr, size);
-    MarkVertexBuffersStale(device_addr, size);
+    {
+        Scope scope{Zone::MarkTracker};
+        memory_tracker.MarkRegionAsGpuModified(device_addr, size);
+        DemoteHotPages(device_addr, size);
+        MarkVertexBuffersStale(device_addr, size);
+    }
     Nx2BufCache::Note(Nx2BufCache::Stat::MarkWritten);
     // Dispatches and draws write the same bindings again and again: an interval set add that
     // changes nothing still erases and reinserts nodes (EDEN_NX2_BUFCACHE_MARK).
-    if (!Nx2BufCache::g_mark_guards ||
-        !Nx2BufCache::RangeCovered(gpu_modified_ranges, device_addr, size)) {
-        gpu_modified_ranges.Add(device_addr, size);
-        gpu_modified_serial.fetch_add(1, std::memory_order_relaxed);
-    } else {
-        Nx2BufCache::Note(Nx2BufCache::Stat::MarkAddSkipped);
+    {
+        Scope scope{Zone::MarkModifiedRanges};
+        if (!Nx2BufCache::g_mark_guards ||
+            !Nx2BufCache::RangeCovered(gpu_modified_ranges, device_addr, size)) {
+            gpu_modified_ranges.Add(device_addr, size);
+            gpu_modified_serial.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            Nx2BufCache::Note(Nx2BufCache::Stat::MarkAddSkipped);
+        }
     }
-    QueueFenceDownload(device_addr, size);
+    {
+        Scope scope{Zone::MarkFenceDownload};
+        QueueFenceDownload(device_addr, size);
+    }
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+        Scope scope{Zone::MarkListWrite};
         Tegra::Nx2MarkGpuWritten(device_addr, size);
         Nx2NoteListWrite(buffer_id, device_addr, size);
     } else {

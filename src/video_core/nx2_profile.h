@@ -92,6 +92,14 @@ enum class Zone : u32 {
     ComputeHostUniform,  ///< BindHostComputeUniformBuffers
     ComputeHostStorage,  ///< BindHostComputeStorageBuffers: sync, write marks, binds
     ComputeHostTexture,  ///< BindHostComputeTextureBuffers
+    // Inside "cb host storage", and MarkWrittenBuffer from every caller.
+    ChsSync,          ///< SynchronizeBuffer of a compute storage binding
+    MarkWritten,      ///< MarkWrittenBuffer outside the zones below
+    MarkPendingRanges, ///< Subtracting the write from the pending downloads' ranges
+    MarkTracker,      ///< Memory tracker GPU-modified marks and hot page demotion
+    MarkModifiedRanges, ///< gpu_modified_ranges
+    MarkFenceDownload, ///< QueueFenceDownload (preflushable ranges, prefetch, read traps)
+    MarkListWrite,    ///< Nx2MarkGpuWritten and Nx2NoteListWrite
     Count,
 };
 
@@ -108,7 +116,9 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "draw manager", "method 3D", "call", "finish macro", "query report", "counter reset",
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
     "compute buffers", "compute descriptors", "compute record", "cb ssbo bind", "cb update",
-    "cb host uniform", "cb host storage", "cb host texture",
+    "cb host uniform", "cb host storage", "cb host texture", "chs sync", "mark written",
+    "mark pending ranges", "mark tracker", "mark modified ranges", "mark fence download",
+    "mark list write",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");
