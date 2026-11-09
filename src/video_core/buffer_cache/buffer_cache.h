@@ -217,6 +217,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::WriteMemory};
     Nx2BufCache::Note(Nx2BufCache::Stat::WriteMemoryCalls);
     Nx2NoteListHostWrite(device_addr, size);
+    NoteUniformWrite(device_addr, size);
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
@@ -294,6 +295,7 @@ void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
     }
 
     Nx2NoteListHostWrite(device_addr, size);
+    NoteUniformWrite(device_addr, size);
     tmp_buffer.resize_destructive(size);
     device_memory.ReadBlockUnsafe(device_addr, tmp_buffer.data(), size);
 
@@ -591,7 +593,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     if (has_new_downloads) {
         memory_tracker.MarkRegionAsGpuModified(*cpu_dest_address, amount);
         DemoteHotPages(*cpu_dest_address, amount);
-        NoteUniformGpuWrite(*cpu_dest_address, amount);
+        NoteUniformWrite(*cpu_dest_address, amount);
         const bool should_sync = Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if (should_sync) {
             runtime.Finish();
@@ -855,17 +857,18 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 template <class P>
 void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     UniformKeep& keep = uniform_keep;
-    const bool unwritten = !keep.gpu_writes_lost && keep.draw_deletions == buffer_deletions;
+    const bool unwritten = !keep.memory_writes_lost && keep.draw_deletions == buffer_deletions;
     keep.draw_deletions = buffer_deletions;
     keep.candidates = {};
     keep.writes.clear();
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
     const bool usable = delta != nullptr && unwritten && VideoCommon::UniformKeepsEnabled();
     if (usable) {
-        keep.writes.insert(keep.writes.end(), keep.gpu_writes.begin(), keep.gpu_writes.end());
+        keep.writes.insert(keep.writes.end(), keep.memory_writes.begin(),
+                           keep.memory_writes.end());
     }
-    keep.gpu_writes.clear();
-    keep.gpu_writes_lost = false;
+    keep.memory_writes.clear();
+    keep.memory_writes_lost = false;
     if (!usable) {
         return;
     }
@@ -889,8 +892,8 @@ bool BufferCache<P>::UniformRangeKept(size_t stage, u32 index, DAddr device_addr
     const auto overlaps = [&](const std::pair<DAddr, DAddr>& write) {
         return write.first < device_addr + size && device_addr < write.second;
     };
-    return !keep.gpu_writes_lost && std::ranges::none_of(keep.writes, overlaps) &&
-           std::ranges::none_of(keep.gpu_writes, overlaps);
+    return !keep.memory_writes_lost && std::ranges::none_of(keep.writes, overlaps) &&
+           std::ranges::none_of(keep.memory_writes, overlaps);
 }
 
 template <class P>
@@ -2752,7 +2755,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
         Scope scope{Zone::MarkTracker};
         memory_tracker.MarkRegionAsGpuModified(device_addr, size);
         DemoteHotPages(device_addr, size);
-        NoteUniformGpuWrite(device_addr, size);
+        NoteUniformWrite(device_addr, size);
         MarkVertexBuffersStale(device_addr, size);
     }
     Nx2BufCache::Note(Nx2BufCache::Stat::MarkWritten);

@@ -922,17 +922,18 @@ private:
 
     /// Uniform keeps: a delta draw binds a small uniform buffer from the stream
     /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
-    /// between the two draws wrote its range: no inline constant data, no rebind, no GPU write and
-    /// no buffer deletion. Anything else in between ends the delta chain.
+    /// between the two draws wrote its range: no inline constant data, no rebind, no CPU write the
+    /// caches were told about, no GPU write and no buffer deletion. Anything else in between ends
+    /// the delta chain.
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
-    void NoteUniformGpuWrite(DAddr device_addr, u64 size) {
+    void NoteUniformWrite(DAddr device_addr, u64 size) {
         UniformKeep& keep = uniform_keep;
-        if (keep.gpu_writes.size() == keep.gpu_writes.capacity()) {
-            keep.gpu_writes_lost = true;
+        if (keep.memory_writes.size() == keep.memory_writes.capacity()) {
+            keep.memory_writes_lost = true;
             return;
         }
-        keep.gpu_writes.emplace_back(device_addr, device_addr + size);
+        keep.memory_writes.emplace_back(device_addr, device_addr + size);
     }
     /// EDEN_NX2_UBO_KEEP_VERIFY=1: binds what a keep would skip the original way and logs where
     /// guest memory changed.
@@ -944,11 +945,11 @@ private:
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
         /// Device ranges written since the previous draw began: inline constant data, then the
-        /// GPU-modified marks.
+        /// CPU writes and GPU-modified marks.
         boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>
             writes;
-        boost::container::static_vector<std::pair<DAddr, DAddr>, 8> gpu_writes;
-        bool gpu_writes_lost{}; ///< More GPU-modified marks than gpu_writes holds
+        boost::container::static_vector<std::pair<DAddr, DAddr>, 8> memory_writes;
+        bool memory_writes_lost{}; ///< More writes than memory_writes holds
         u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
         u64 kept{};
         u64 streamed_binds{};
