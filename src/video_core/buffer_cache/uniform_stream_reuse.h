@@ -274,10 +274,12 @@ template <class Runtime, class DeviceMemory>
     return true;
 }
 
-/// EDEN_NX2_UNIFORM_KEEPS=0 turns uniform keeps off (every delta draw compares the guest bytes).
+/// EDEN_NX2_UNIFORM_KEEPS=1 turns uniform keeps on. Off by default: in Ocarina of Time
+/// EDEN_NX2_UBO_KEEP_VERIFY found about 1 in 1,200 kept ranges changed since the previous draw
+/// without the caches being told (CPU writes to pages already CPU-modified).
 inline const bool g_uniform_keeps = [] {
     const char* const value = std::getenv("EDEN_NX2_UNIFORM_KEEPS");
-    return value == nullptr || value[0] != '0';
+    return value != nullptr && value[0] == '1';
 }();
 
 [[nodiscard]] inline bool UniformKeepsEnabled() noexcept {
