@@ -126,6 +126,7 @@ void BufferCache<P>::TickFrame() {
                 memory_tracker.MarkRegionHot(it->first, DEVICE_PAGESIZE, false);
                 ProtectCleanHotPage(it->first, *it->second);
                 Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
+                Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteIdle);
                 it = hot_pages.erase(it);
             } else {
                 ++it;
@@ -1228,7 +1229,7 @@ template <class P>
 void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
                                            DAddr device_addr, const u8* data, u64 size) {
     if (!cpu_written.Intersects(device_addr, size)) {
-        device_memory.WriteBlockUnsafe(device_addr, data, size);
+        WriteDownloadedBlock(device_addr, data, size);
         return;
     }
     Common::RangeSet<DAddr> parts;
@@ -1237,8 +1238,44 @@ void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_wr
         parts.Subtract(start, end - start);
     });
     parts.ForEach([&](DAddr start, DAddr end) {
-        device_memory.WriteBlockUnsafe(start, data + (start - device_addr), end - start);
+        WriteDownloadedBlock(start, data + (start - device_addr), end - start);
     });
+}
+
+template <class P>
+void BufferCache<P>::WriteDownloadedBlock(DAddr device_addr, const u8* data, u64 size) {
+    if (!Nx2BufCache::g_hot_gpu_pages || hot_pages.empty()) {
+        device_memory.WriteBlockUnsafe(device_addr, data, size);
+        return;
+    }
+    const DAddr end = device_addr + size;
+    DAddr pos = device_addr;
+    while (pos < end) {
+        const DAddr page = Common::AlignDown(pos, DEVICE_PAGESIZE);
+        const DAddr chunk_end = (std::min<DAddr>)(page + DEVICE_PAGESIZE, end);
+        const auto it = hot_pages.find(page);
+        u8* const guest = device_memory.template GetPointer<u8>(page);
+        if (it == hot_pages.end() || !it->second->gpu_page || !it->second->valid ||
+            guest == nullptr) {
+            device_memory.WriteBlockUnsafe(pos, data + (pos - device_addr), chunk_end - pos);
+            pos = chunk_end;
+            continue;
+        }
+        // An unprotected gpu_page: bytes the guest changed since the last sync are CPU writes
+        // the download must not overwrite (the fault would have claimed them on a protected
+        // page). The rest takes the GPU's bytes, and the copy with them, so the next sync does
+        // not send them back.
+        HotPage& hot = *it->second;
+        for (DAddr addr = pos; addr < chunk_end; ++addr) {
+            const size_t offset = addr - page;
+            if (guest[offset] == hot.bytes[offset]) {
+                const u8 value = data[addr - device_addr];
+                guest[offset] = value;
+                hot.bytes[offset] = value;
+            }
+        }
+        pos = chunk_end;
+    }
 }
 
 template <class P>
@@ -3607,15 +3644,18 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
         if (!hot.valid || guest == nullptr) {
             // Without a copy only the usual (whole page) upload knows what to send.
             hot_demote_pages.push_back(page);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteNoCopy);
             return false;
         }
         SyncHotGpuPage(page, hot, guest);
-        // Demoted at a sync that changes nothing (UploadHotPages reads the copy after the
+        // GPU-modified bytes are fine: only words the guest changed are sent, and claimed from
+        // the GPU as WriteMemory would. A command list page still needs its notifications;
+        // demoted at a sync that changes nothing (UploadHotPages reads the copy after the
         // demotions), so the page is protected again clean.
         const bool changed = !hot_changed_pages.empty() && hot_changed_pages.back() == page;
-        if (!changed && (gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
-                         Tegra::Nx2IsCommandListPage(page))) {
+        if (!changed && Tegra::Nx2IsCommandListPage(page)) {
             hot_demote_pages.push_back(page);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteGpuRange);
         }
         return true;
     }
@@ -3624,11 +3664,13 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
     if (gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
         Tegra::Nx2IsCommandListPage(page) || Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE)) {
         hot_demote_pages.push_back(page);
+        Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteGpuRange);
         return false;
     }
     const u8* const guest = device_memory.template GetPointer<u8>(page);
     if (guest == nullptr) {
         hot.valid = false;
+        Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteNoCopy);
         return false;
     }
     if (hot.valid && Nx2BufCache::BytesEqual(hot.bytes.data(), guest, DEVICE_PAGESIZE)) {
@@ -3646,6 +3688,7 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
         } else if (hot.unchanged >= 64 && frame_tick >= hot.changed_frame + 4) {
             // Unchanged for many syncs over several frames: protect it again.
             hot_demote_pages.push_back(page);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteIdle);
         }
         return true;
     }
@@ -3695,9 +3738,17 @@ void BufferCache<P>::SyncHotGpuPage(DAddr page, HotPage& hot, const u8* guest) {
         } else if (!Nx2BufCache::g_hot_demote && hot.unchanged >= 64 &&
                    frame_tick >= hot.changed_frame + 4) {
             hot_demote_pages.push_back(page);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteIdle);
         }
         return;
     }
+    // What WriteMemory does for a noticed CPU write: the guest's bytes win over GPU results
+    // there, and pending downloads no longer write over them.
+    boost::container::small_vector<std::pair<DAddr, u64>, 8> claimed;
+    for (size_t i = spans_before; i < hot_changed_spans.size(); ++i) {
+        claimed.emplace_back(hot_changed_spans[i].first, hot_changed_spans[i].second);
+    }
+    ClaimCpuWrites(claimed);
     hot.unchanged = 0;
     hot.changed_frame = frame_tick;
     hot_changed_pages.push_back(page);
@@ -3743,11 +3794,11 @@ void BufferCache<P>::ApplyHotPageChanges() {
         // that were not (or no longer) in gpu_modified_ranges. OoT's 8 KiB compute storage ring
         // (CPU-written parameters next to GPU-written state) came out 8% too bright that way.
         // EDEN_NX2_HOT_GPU_PAGES lets them in as gpu_page, which never uploads the whole page.
-        if (hot_pages.contains(page) || gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
-            Tegra::Nx2IsCommandListPage(page)) {
+        if (hot_pages.contains(page) || Tegra::Nx2IsCommandListPage(page)) {
             continue;
         }
-        const bool gpu_page = Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE);
+        const bool gpu_page = gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
+                              Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE);
         const u8* const guest =
             gpu_page ? device_memory.template GetPointer<u8>(page) : nullptr;
         if (gpu_page && (!Nx2BufCache::g_hot_gpu_pages || guest == nullptr)) {
@@ -3835,15 +3886,21 @@ void BufferCache<P>::DemoteHotPages(DAddr device_addr, u64 size) {
         ranges.emplace_back(begin, length);
     });
     for (const auto& [begin, length] : ranges) {
-        memory_tracker.MarkRegionHot(begin, length, false);
         for (DAddr page = begin; page < begin + length; page += DEVICE_PAGESIZE) {
             const auto it = hot_pages.find(page);
             if (it == hot_pages.end()) {
+                memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
                 continue;
             }
-            ProtectCleanHotPage(page, *it->second);
+            if (it->second->gpu_page) {
+                // Synced by word: GPU results the guest did not rewrite are never sent.
+                Nx2BufCache::Note(Nx2BufCache::Stat::HotKeptGpuWrite);
+                continue;
+            }
+            memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
             hot_pages.erase(it);
             Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemoteGpuWrite);
         }
     }
 }
@@ -3928,6 +3985,12 @@ void BufferCache<P>::RefreshHotShadows(DAddr device_addr, const u8* bytes, u64 s
             // The host holds these bytes now, as after UploadHotPages.
             std::memcpy(hot.bytes.data(), bytes + (page - device_addr), DEVICE_PAGESIZE);
             hot.valid = true;
+        } else if (hot.gpu_page && hot.valid) {
+            // The copy is per byte for these (only changed words are sent).
+            const DAddr first = (std::max)(page, device_addr);
+            const DAddr last = (std::min)(page + DEVICE_PAGESIZE, device_addr + size);
+            std::memcpy(hot.bytes.data() + (first - page), bytes + (first - device_addr),
+                        last - first);
         } else {
             hot.valid = false;
         }

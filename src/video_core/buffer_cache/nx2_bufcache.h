@@ -56,8 +56,10 @@ inline const bool g_hot_pages = EnvOn("EDEN_NX2_HOT_PAGES");
 
 /// EDEN_NX2_HOT_GPU_PAGES=1 (opt-in): pages the GPU has ever written (Nx2MayBeGpuWritten) may
 /// become hot too. Their syncs upload only the 4-byte words that changed against the copy,
-/// never the whole page, so GPU results the guest did not rewrite are not overwritten; a
-/// demoted one whose guest bytes still match the copy is protected again clean.
+/// never the whole page, so GPU results the guest did not rewrite are not overwritten. They stay
+/// hot across GPU writes (the changed words are claimed from the GPU as WriteMemory would, and
+/// downloads skip them); a demoted one whose guest bytes still match the copy is protected again
+/// clean.
 inline const bool g_hot_gpu_pages = [] {
     const char* const value = std::getenv("EDEN_NX2_HOT_GPU_PAGES");
     return value != nullptr && value[0] == '1';
@@ -303,6 +305,11 @@ enum class Stat : u32 {
     SyncPrecheckClean, ///< syncs a SYNC_SKIP miss sent to the walk, found clean by the precheck
     WriteMemoryCalls,  ///< BufferCache::WriteMemory calls
     DirtyWriteSkip,    ///< of those, over pages all CPU-dirty already (EDEN_NX2_DIRTY_WRITE_SKIP)
+    HotDemoteGpuWrite, ///< hot pages demoted by a GPU write (DemoteHotPages)
+    HotKeptGpuWrite,   ///< gpu_page hot pages a GPU write left hot (EDEN_NX2_HOT_GPU_PAGES)
+    HotDemoteNoCopy,   ///< hot pages demoted at a sync for an invalid copy or no guest memory
+    HotDemoteGpuRange, ///< hot pages demoted at a sync for GPU-modified bytes or a command list
+    HotDemoteIdle,     ///< hot pages demoted unchanged (not for cost) or every 256 frames
     UboClassicBank,    ///< classic binds of a native 64 KiB bank
     UboClassicSmall,   ///< classic binds within the stream size (GPU-written, or no host buffer)
     BankCompare,       ///< UploadNativeBank calls (once a frame per bank)
@@ -375,6 +382,12 @@ inline void Report() {
              static_cast<double>(protects[2]) * 1e9 / static_cast<double>(window),
              static_cast<double>(protects[3]) * 1e9 / static_cast<double>(window),
              rate(Stat::WriteMemoryCalls), rate(Stat::DirtyWriteSkip));
+    LOG_INFO(HW_GPU,
+             "Buffer cache hot demotes per second: GPU write {:.0f} (kept hot {:.0f}), no copy "
+             "{:.0f}, GPU range or command list {:.0f}, idle {:.0f}, cost {:.0f}",
+             rate(Stat::HotDemoteGpuWrite), rate(Stat::HotKeptGpuWrite),
+             rate(Stat::HotDemoteNoCopy), rate(Stat::HotDemoteGpuRange),
+             rate(Stat::HotDemoteIdle), rate(Stat::HotCostDemote));
     LOG_INFO(HW_GPU,
              "Buffer cache banks per second: classic binds of banks {:.0f}, within the stream "
              "size {:.0f} | bank compares {:.0f}, pages compared {:.0f}, already compared this "

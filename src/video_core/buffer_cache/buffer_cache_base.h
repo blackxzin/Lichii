@@ -276,6 +276,10 @@ public:
     void WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written, DAddr device_addr,
                                const u8* data, u64 size);
 
+    /// EDEN_NX2_HOT_GPU_PAGES: on gpu_page hot pages, only bytes the guest has not changed since
+    /// the last sync take the downloaded value (and the copy follows).
+    void WriteDownloadedBlock(DAddr device_addr, const u8* data, u64 size);
+
     bool OnCPUWrite(DAddr device_addr, u64 size);
 
     void DownloadMemory(DAddr device_addr, u64 size);
