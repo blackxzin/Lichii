@@ -224,13 +224,8 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     return signal_value;
 }
 
-bool Scheduler::DeferFlush() {
-    // Fences come one per compute release: ~11,500 a second in Hyrule Warriors: Age of
-    // Imprisonment fights, each a queue submission (~22,000 a second with the others), which
-    // kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
-    // Command list copies after dispatches were ~9,000 more a second, of which the front waited
-    // for about 5%. A guest read waiting for downloads (Nx2Reactive::WaitLanding) has the
-    // fence manager submit at once instead (FenceManager::SignalFence).
+namespace {
+s64 FenceFlushIntervalUs() {
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
         if (value != nullptr) {
@@ -238,6 +233,23 @@ bool Scheduler::DeferFlush() {
         }
         return s64{500};
     }();
+    return interval_us;
+}
+} // Anonymous namespace
+
+bool Scheduler::DeferredFlushInWindow() const {
+    return flush_pending && std::chrono::steady_clock::now() - last_flush <
+                                std::chrono::microseconds{FenceFlushIntervalUs()};
+}
+
+bool Scheduler::DeferFlush() {
+    // Fences come one per compute release: ~11,500 a second in Hyrule Warriors: Age of
+    // Imprisonment fights, each a queue submission (~22,000 a second with the others), which
+    // kept the Vulkan worker busy submitting. Batched within 500 us: ~10-15% more fps there.
+    // Command list copies after dispatches were ~9,000 more a second, of which the front waited
+    // for about 5%. A guest read waiting for downloads (Nx2Reactive::WaitLanding) has the
+    // fence manager submit at once instead (FenceManager::SignalFence).
+    const s64 interval_us = FenceFlushIntervalUs();
     if (interval_us <= 0 || !VideoCommon::GpuSplit::OnBackThread() ||
         std::chrono::steady_clock::now() - last_flush >= std::chrono::microseconds{interval_us}) {
         return false;

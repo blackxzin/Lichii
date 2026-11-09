@@ -91,6 +91,10 @@ constexpr u64 RingPrefetchWords = 128;
 // with runs, instead of running it straight after (one pass of the loop's bookkeeping fewer).
 const bool g_delta_chain = Nx2Switch("EDEN_NX2_DELTA_CHAIN", true);
 
+// EDEN_NX2_IDLE_FLUSH_HOLD=0: an idle back submits deferred work as soon as its spin ends, even
+// within the deferral window.
+const bool g_idle_flush_hold = Nx2Switch("EDEN_NX2_IDLE_FLUSH_HOLD", true);
+
 void PrefetchRingLine(const u64* address) {
 #if defined(__clang__) || defined(__GNUC__)
     __builtin_prefetch(address, 0, 3);
@@ -1258,6 +1262,18 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position) {
                 Nx2Profile::Add(Nx2Profile::Counter::SplitWaitsPastSpin, 1);
+            }
+            // A submission deferred within its window waits for it to end: going idle between
+            // bursts of the front, the back otherwise submitted each burst on its own.
+            if (available == read_position && idle_hold != nullptr && g_idle_flush_hold) {
+                for (u32 spins = 0; available == read_position &&
+                                    !hook_requested.load(std::memory_order_relaxed) &&
+                                    !stop_token.stop_requested() &&
+                                    ((spins & 255) != 0 || idle_hold(idle_argument));
+                     ++spins) {
+                    Pause();
+                    available = published.load(std::memory_order_acquire);
+                }
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);

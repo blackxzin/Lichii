@@ -142,8 +142,12 @@ public:
         return on_back_thread;
     }
     /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
-    void SetIdleHook(void (*hook)(void*), void* argument) {
+    /// `hold`: whether the hook's work would rather wait a little (a submission deferred within
+    /// its window); the idle back then keeps spinning until it doesn't, work arrives or another
+    /// thread asks for the hook.
+    void SetIdleHook(void (*hook)(void*), void* argument, bool (*hold)(void*) = nullptr) {
         idle_hook = hook;
+        idle_hold = hold;
         idle_argument = argument;
     }
     /// Any thread: whether the back thread runs (false before it starts and once it stopped).
@@ -798,6 +802,7 @@ private:
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
     void (*idle_hook)(void*){};
+    bool (*idle_hold)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};

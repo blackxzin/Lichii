@@ -465,8 +465,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
             gpu.ForEachPendingCpuWrite(callback);
         });
     VideoCommon::GpuSplit::Get().SetIdleHook(
-        [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
-        &scheduler);
+        [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); }, &scheduler,
+        [](void* argument) { return static_cast<Scheduler*>(argument)->DeferredFlushInWindow(); });
     if (VideoCommon::Nx2WriteHandoff::Enabled()) {
         // Whoever takes or releases the buffer cache's lock first applies the guest write traps
         // queued while it was held, as each trap would have once it got the lock (OnCPUWrite).
