@@ -3139,8 +3139,12 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     // outside this range: when no page of it is CPU-dirty or unprotected, the walk below finds
     // nothing to upload and changes no tracker state, and the range is still clean
     // (EDEN_NX2_SYNC_PRECHECK). Read only, page granular, against the walk's word granularity.
-    if (Nx2BufCache::g_sync_precheck && skip_clean &&
-        !memory_tracker.IsRegionUploadDirty(device_addr, size)) {
+    bool precheck_clean = false;
+    if (Nx2BufCache::g_sync_precheck && skip_clean) {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::SyncPrecheck};
+        precheck_clean = !memory_tracker.IsRegionUploadDirty(device_addr, size);
+    }
+    if (precheck_clean) {
         if (skip_entry != nullptr) {
             *skip_entry = SyncSkip{
                 .buffer = &buffer,
@@ -3157,6 +3161,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         return true;
     }
     Nx2BufCache::Note(Nx2BufCache::Stat::SyncWalk);
+    VideoCommon::Nx2Profile::Scope walk_scope{VideoCommon::Nx2Profile::Zone::SyncWalk};
     const auto for_each_upload_range = [&](auto&& func) {
         if (skip_clean) {
             memory_tracker.ForEachDirtyUploadRange(device_addr, size, func);

@@ -100,6 +100,8 @@ enum class Zone : u32 {
     MarkModifiedRanges, ///< gpu_modified_ranges
     MarkFenceDownload, ///< QueueFenceDownload (preflushable ranges, prefetch, read traps)
     MarkListWrite,    ///< Nx2MarkGpuWritten and Nx2NoteListWrite
+    SyncPrecheck,     ///< SynchronizeBuffer's precheck after a SYNC_SKIP miss (every caller)
+    SyncWalk,         ///< SynchronizeBuffer's walk and upload (every caller)
     Count,
 };
 
@@ -118,7 +120,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "compute buffers", "compute descriptors", "compute record", "cb ssbo bind", "cb update",
     "cb host uniform", "cb host storage", "cb host texture", "chs sync", "mark written",
     "mark pending ranges", "mark tracker", "mark modified ranges", "mark fence download",
-    "mark list write",
+    "mark list write", "sync precheck", "sync walk",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");
