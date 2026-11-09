@@ -2192,23 +2192,47 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
-    if (ReuseGeometry(index_memo, gpu_addr_begin, gpu_addr_end, draw_size)) {
-        channel_state->index_buffer = index_memo.binding;
+    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
+    const u32 size = (std::min)(address_size, draw_size);
+    // The draw macros mark the index buffer dirty on every draw, mostly with the same buffer and
+    // another count: the address and the buffer found are kept for any size up to the one the
+    // buffer was found for.
+    const bool memo_hit = size != 0 && size <= index_memo.extra &&
+                          ReuseGeometry(index_memo, gpu_addr_begin, gpu_addr_end, index_memo.extra);
+    if (memo_hit && !Nx2Perf::Verify()) {
+        channel_state->index_buffer = Binding{
+            .device_addr = index_memo.binding.device_addr,
+            .size = size,
+            .buffer_id = index_memo.binding.buffer_id,
+        };
         return;
     }
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
-    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
-    const u32 size = (std::min)(address_size, draw_size);
     if (size == 0 || !device_addr) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
+    const BufferId buffer_id = FindBuffer(*device_addr, size, false);
     channel_state->index_buffer = Binding{
         .device_addr = *device_addr,
         .size = size,
-        .buffer_id = FindBuffer(*device_addr, size, false),
+        .buffer_id = buffer_id,
     };
-    StoreGeometry(index_memo, gpu_addr_begin, gpu_addr_end, draw_size, channel_state->index_buffer);
+    if (memo_hit) {
+        if (index_memo.binding.device_addr != *device_addr ||
+            index_memo.binding.buffer_id != buffer_id) {
+            static std::atomic<u32> reports{};
+            if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(HW_GPU,
+                          "Nx2Perf index buffer memo mismatch: {:#x}+{:#x} kept {:#x} buffer {}, "
+                          "found {:#x} buffer {}",
+                          gpu_addr_begin, size, index_memo.binding.device_addr,
+                          index_memo.binding.buffer_id.index, *device_addr, buffer_id.index);
+            }
+        }
+        return;
+    }
+    StoreGeometry(index_memo, gpu_addr_begin, gpu_addr_end, size, channel_state->index_buffer);
 }
 
 template <class P>
