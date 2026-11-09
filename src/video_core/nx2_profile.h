@@ -82,6 +82,10 @@ enum class Zone : u32 {
     WaitForIdle,  ///< wait_for_idle (rasterizer WaitForIdle)
     CacheBarrier, ///< invalidate_texture_data_cache, fragment and tiled cache barriers
     IdleHook,     ///< The back's idle hook (Scheduler::FlushDeferred: submits)
+    // Inside "compute" (ComputePipeline::Configure and RasterizerVulkan::DispatchCompute).
+    ComputeBuffers,     ///< Storage, texture and uniform buffer binds and their uploads
+    ComputeDescriptors, ///< Image descriptors and the descriptor buffer
+    ComputeRecord,      ///< The dispatch's barrier and command after Configure
     Count,
 };
 
@@ -97,6 +101,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "ring decode", "delta apply", "cb write", "cb bind", "cb multi", "draw batch",
     "draw manager", "method 3D", "call", "finish macro", "query report", "counter reset",
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
+    "compute buffers", "compute descriptors", "compute record",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");

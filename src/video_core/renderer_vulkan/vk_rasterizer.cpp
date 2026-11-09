@@ -2130,6 +2130,7 @@ void RasterizerVulkan::DispatchCompute() {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute resources unavailable");
         return;
     }
+    VideoCommon::Nx2Profile::Scope record_scope{VideoCommon::Nx2Profile::Zone::ComputeRecord};
     SCOPE_EXIT {
         if (!frame_dump.Capturing()) {
             return;

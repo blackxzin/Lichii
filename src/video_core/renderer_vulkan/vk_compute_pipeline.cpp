@@ -471,15 +471,19 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     shadow.reset();
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
-    buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
-    buffer_cache.UnbindComputeStorageBuffers();
-    size_t ssbo_index{};
-    for (const auto& desc : info.storage_buffers_descriptors) {
-        ASSERT(desc.count == 1);
-        buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written, desc.indirect_offset,
-                                              desc.write_extent);
-        ++ssbo_index;
+    {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ComputeBuffers};
+        buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask,
+                                                  &uniform_buffer_sizes);
+        buffer_cache.UnbindComputeStorageBuffers();
+        size_t ssbo_index{};
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            ASSERT(desc.count == 1);
+            buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
+                                                  desc.is_written, desc.indirect_offset,
+                                                  desc.write_extent);
+            ++ssbo_index;
+        }
     }
 
     texture_cache.SynchronizeDescriptors(true);
@@ -696,6 +700,8 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         shadow = texture_runtime.CreateByteAddressedShadow(target_view);
     }
 
+    std::optional<VideoCommon::Nx2Profile::Scope> buffers_scope;
+    buffers_scope.emplace(VideoCommon::Nx2Profile::Zone::ComputeBuffers);
     buffer_cache.UnbindComputeTextureBuffers();
     size_t index{};
     const auto add_buffer{[&](const auto& desc) {
@@ -727,7 +733,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
+    buffers_scope.reset();
 
+    VideoCommon::Nx2Profile::Scope descriptors_scope{
+        VideoCommon::Nx2Profile::Zone::ComputeDescriptors};
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
