@@ -54,6 +54,15 @@ inline const bool g_geometry_memo = EnvOn("EDEN_NX2_BUFCACHE_GEOMEMO");
 /// unprotected and compared at each sync.
 inline const bool g_hot_pages = EnvOn("EDEN_NX2_HOT_PAGES");
 
+/// EDEN_NX2_HOT_GPU_PAGES=1 (opt-in): pages the GPU has ever written (Nx2MayBeGpuWritten) may
+/// become hot too. Their syncs upload only the 4-byte words that changed against the copy,
+/// never the whole page, so GPU results the guest did not rewrite are not overwritten; a
+/// demoted one whose guest bytes still match the copy is protected again clean.
+inline const bool g_hot_gpu_pages = [] {
+    const char* const value = std::getenv("EDEN_NX2_HOT_GPU_PAGES");
+    return value != nullptr && value[0] == '1';
+}();
+
 /// EDEN_NX2_COMPUTE_BINDCACHE=0: compute dispatches look their constant buffers up and copy
 /// them to the stream buffer every time, even when unchanged since the previous dispatch.
 inline const bool g_compute_bindcache = EnvOn("EDEN_NX2_COMPUTE_BINDCACHE");

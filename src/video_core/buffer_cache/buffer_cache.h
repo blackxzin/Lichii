@@ -124,6 +124,7 @@ void BufferCache<P>::TickFrame() {
         for (auto it = hot_pages.begin(); it != hot_pages.end();) {
             if (it->second->changed_frame + 256 < frame_tick) {
                 memory_tracker.MarkRegionHot(it->first, DEVICE_PAGESIZE, false);
+                ProtectCleanHotPage(it->first, *it->second);
                 Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
                 it = hot_pages.erase(it);
             } else {
@@ -3227,6 +3228,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         bool hot_uploaded = false;
         if (Nx2BufCache::g_hot_pages) {
             hot_changed_pages.clear();
+            hot_changed_spans.clear();
             hot_promote_pages.clear();
             hot_demote_pages.clear();
             memory_tracker.ForEachUploadRange(
@@ -3541,6 +3543,7 @@ template <class P>
 std::optional<bool> BufferCache<P>::SyncSkippedHotPages(Buffer& buffer, DAddr device_addr,
                                                         u64 hot_mask) {
     hot_changed_pages.clear();
+    hot_changed_spans.clear();
     hot_promote_pages.clear();
     hot_demote_pages.clear();
     const DAddr base = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
@@ -3599,6 +3602,23 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
         return false;
     }
     HotPage& hot = *it->second;
+    if (hot.gpu_page) {
+        const u8* const guest = device_memory.template GetPointer<u8>(page);
+        if (!hot.valid || guest == nullptr) {
+            // Without a copy only the usual (whole page) upload knows what to send.
+            hot_demote_pages.push_back(page);
+            return false;
+        }
+        SyncHotGpuPage(page, hot, guest);
+        // Demoted at a sync that changes nothing (UploadHotPages reads the copy after the
+        // demotions), so the page is protected again clean.
+        const bool changed = !hot_changed_pages.empty() && hot_changed_pages.back() == page;
+        if (!changed && (gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
+                         Tegra::Nx2IsCommandListPage(page))) {
+            hot_demote_pages.push_back(page);
+        }
+        return true;
+    }
     // A page that came to hold a command list, or that the GPU wrote, after promotion needs its
     // write notifications (see ApplyHotPageChanges).
     if (gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
@@ -3634,18 +3654,84 @@ bool BufferCache<P>::SyncHotPage(DAddr page) {
     hot.unchanged = 0;
     hot.changed_frame = frame_tick;
     hot_changed_pages.push_back(page);
+    hot_changed_spans.emplace_back(page, static_cast<u32>(DEVICE_PAGESIZE));
     return true;
+}
+
+template <class P>
+void BufferCache<P>::SyncHotGpuPage(DAddr page, HotPage& hot, const u8* guest) {
+    // Each word read once: what goes into the copy is what is uploaded.
+    static constexpr u32 WORD = sizeof(u32);
+    const size_t spans_before = hot_changed_spans.size();
+    u32 run_begin = 0;
+    bool in_run = false;
+    for (u32 offset = 0; offset < DEVICE_PAGESIZE; offset += WORD) {
+        u32 now;
+        u32 old;
+        std::memcpy(&now, guest + offset, WORD);
+        std::memcpy(&old, hot.bytes.data() + offset, WORD);
+        if (now != old) {
+            std::memcpy(hot.bytes.data() + offset, &now, WORD);
+            if (!in_run) {
+                run_begin = offset;
+                in_run = true;
+            }
+        } else if (in_run) {
+            hot_changed_spans.emplace_back(page + run_begin, offset - run_begin);
+            in_run = false;
+        }
+    }
+    if (in_run) {
+        hot_changed_spans.emplace_back(page + run_begin,
+                                       static_cast<u32>(DEVICE_PAGESIZE) - run_begin);
+    }
+    if (hot_changed_spans.size() == spans_before) {
+        Nx2BufCache::Note(Nx2BufCache::Stat::HotSame);
+        ++hot.unchanged;
+        if (Nx2BufCache::g_hot_demote && hot.unchanged >= HOT_DEMOTE_UNCHANGED) {
+            hot_demote_pages.push_back(page);
+            page_heat[page].no_promote_until = frame_tick + HOT_COOLDOWN_FRAMES;
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotCostDemote);
+        } else if (!Nx2BufCache::g_hot_demote && hot.unchanged >= 64 &&
+                   frame_tick >= hot.changed_frame + 4) {
+            hot_demote_pages.push_back(page);
+        }
+        return;
+    }
+    hot.unchanged = 0;
+    hot.changed_frame = frame_tick;
+    hot_changed_pages.push_back(page);
+}
+
+template <class P>
+void BufferCache<P>::ProtectCleanHotPage(DAddr page, const HotPage& hot) {
+    if (!hot.gpu_page || !hot.valid) {
+        return;
+    }
+    // Protect first, then compare: a guest write after the protection faults and marks the page
+    // dirty again, one before it shows in the compare.
+    memory_tracker.UnmarkRegionAsCpuModified(page, DEVICE_PAGESIZE);
+    const u8* const guest = device_memory.template GetPointer<u8>(page);
+    if (guest == nullptr ||
+        !Nx2BufCache::BytesEqual(hot.bytes.data(), guest, DEVICE_PAGESIZE)) {
+        memory_tracker.MarkRegionAsCpuModified(page, DEVICE_PAGESIZE);
+        NoteCpuDirty(page, DEVICE_PAGESIZE);
+    }
 }
 
 template <class P>
 void BufferCache<P>::ApplyHotPageChanges() {
     for (const DAddr page : hot_demote_pages) {
-        if (hot_pages.erase(page) != 0) {
-            memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
-            // Still CPU-dirty, now as a plain page: SYNC_SKIP entries over it must walk again.
-            NoteCpuDirty(page, DEVICE_PAGESIZE);
-            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
+        const auto it = hot_pages.find(page);
+        if (it == hot_pages.end()) {
+            continue;
         }
+        memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, false);
+        // Still CPU-dirty, now as a plain page: SYNC_SKIP entries over it must walk again.
+        NoteCpuDirty(page, DEVICE_PAGESIZE);
+        ProtectCleanHotPage(page, *it->second);
+        hot_pages.erase(it);
+        Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
     }
     for (const DAddr page : hot_promote_pages) {
         if (hot_pages.size() >= MAX_HOT_PAGES) {
@@ -3656,11 +3742,25 @@ void BufferCache<P>::ApplyHotPageChanges() {
         // page, and on a page a dispatch writes too that put stale guest bytes over GPU results
         // that were not (or no longer) in gpu_modified_ranges. OoT's 8 KiB compute storage ring
         // (CPU-written parameters next to GPU-written state) came out 8% too bright that way.
+        // EDEN_NX2_HOT_GPU_PAGES lets them in as gpu_page, which never uploads the whole page.
         if (hot_pages.contains(page) || gpu_modified_ranges.Intersects(page, DEVICE_PAGESIZE) ||
-            Tegra::Nx2IsCommandListPage(page) || Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE)) {
+            Tegra::Nx2IsCommandListPage(page)) {
             continue;
         }
-        hot_pages.emplace(page, std::make_unique<HotPage>());
+        const bool gpu_page = Tegra::Nx2MayBeGpuWritten(page, DEVICE_PAGESIZE);
+        const u8* const guest =
+            gpu_page ? device_memory.template GetPointer<u8>(page) : nullptr;
+        if (gpu_page && (!Nx2BufCache::g_hot_gpu_pages || guest == nullptr)) {
+            continue;
+        }
+        HotPage& hot = *hot_pages.emplace(page, std::make_unique<HotPage>()).first->second;
+        if (gpu_page) {
+            // This sync's walk uploads the page from guest memory after this: the copy starts
+            // from bytes the host has (or older ones, which the next sync sends again).
+            hot.gpu_page = true;
+            std::memcpy(hot.bytes.data(), guest, DEVICE_PAGESIZE);
+            hot.valid = true;
+        }
         memory_tracker.MarkRegionHot(page, DEVICE_PAGESIZE, true);
         // Unprotected and dirty from now on; this sync already uploads the page.
         memory_tracker.MarkRegionAsCpuModified(page, DEVICE_PAGESIZE);
@@ -3674,26 +3774,30 @@ void BufferCache<P>::UploadHotPages(Buffer& buffer) {
     const DAddr buffer_start = buffer.CpuAddr();
     boost::container::small_vector<BufferCopy, 8> copies;
     u64 total_size = 0;
-    for (const DAddr page : hot_changed_pages) {
-        const u64 dst_offset = page - buffer_start;
+    const auto span_bytes = [&](DAddr addr) {
+        return hot_pages[Common::AlignDown(addr, DEVICE_PAGESIZE)]->bytes.data() +
+               (addr & Core::DEVICE_PAGEMASK);
+    };
+    for (const auto& [addr, length] : hot_changed_spans) {
+        const u64 dst_offset = addr - buffer_start;
         if (!copies.empty() && copies.back().dst_offset + copies.back().size == dst_offset) {
-            copies.back().size += DEVICE_PAGESIZE;
+            copies.back().size += length;
         } else {
             copies.push_back(BufferCopy{
                 .src_offset = total_size,
                 .dst_offset = dst_offset,
-                .size = DEVICE_PAGESIZE,
+                .size = length,
             });
         }
-        total_size += DEVICE_PAGESIZE;
+        total_size += length;
     }
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         auto upload_staging = runtime.UploadStagingBuffer(total_size);
         u64 src_offset = 0;
-        for (const DAddr page : hot_changed_pages) {
-            std::memcpy(upload_staging.mapped_span.data() + src_offset,
-                        hot_pages[page]->bytes.data(), DEVICE_PAGESIZE);
-            src_offset += DEVICE_PAGESIZE;
+        for (const auto& [addr, length] : hot_changed_spans) {
+            std::memcpy(upload_staging.mapped_span.data() + src_offset, span_bytes(addr),
+                        length);
+            src_offset += length;
         }
         for (BufferCopy& copy : copies) {
             copy.src_offset += upload_staging.offset;
@@ -3702,10 +3806,9 @@ void BufferCache<P>::UploadHotPages(Buffer& buffer) {
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies_span);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies_span, true, can_reorder);
     } else {
-        for (const DAddr page : hot_changed_pages) {
-            buffer.ImmediateUpload(page - buffer_start,
-                                   std::span<const u8>(hot_pages[page]->bytes.data(),
-                                                       DEVICE_PAGESIZE));
+        for (const auto& [addr, length] : hot_changed_spans) {
+            buffer.ImmediateUpload(addr - buffer_start,
+                                   std::span<const u8>(span_bytes(addr), length));
         }
         any_buffer_uploaded = true;
     }
@@ -3732,12 +3835,16 @@ void BufferCache<P>::DemoteHotPages(DAddr device_addr, u64 size) {
         ranges.emplace_back(begin, length);
     });
     for (const auto& [begin, length] : ranges) {
-        for (DAddr page = begin; page < begin + length; page += DEVICE_PAGESIZE) {
-            if (hot_pages.erase(page) != 0) {
-                Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
-            }
-        }
         memory_tracker.MarkRegionHot(begin, length, false);
+        for (DAddr page = begin; page < begin + length; page += DEVICE_PAGESIZE) {
+            const auto it = hot_pages.find(page);
+            if (it == hot_pages.end()) {
+                continue;
+            }
+            ProtectCleanHotPage(page, *it->second);
+            hot_pages.erase(it);
+            Nx2BufCache::Note(Nx2BufCache::Stat::HotDemote);
+        }
     }
 }
 

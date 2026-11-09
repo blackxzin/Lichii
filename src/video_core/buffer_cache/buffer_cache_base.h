@@ -841,6 +841,7 @@ private:
         bool valid{};
         u32 unchanged{};    ///< Syncs since the bytes last changed
         u64 changed_frame{};
+        bool gpu_page{};    ///< EDEN_NX2_HOT_GPU_PAGES: uploads only its changed words
     };
     struct PageHeat {
         u32 heat{};
@@ -856,6 +857,9 @@ private:
     std::unordered_map<DAddr, std::unique_ptr<HotPage>> hot_pages;
     std::unordered_map<DAddr, PageHeat> page_heat;
     std::vector<DAddr> hot_changed_pages;
+    /// What UploadHotPages sends from the copies: whole pages, or the changed words of
+    /// gpu_page ones.
+    std::vector<std::pair<DAddr, u32>> hot_changed_spans;
     std::vector<DAddr> hot_promote_pages;
     std::vector<DAddr> hot_demote_pages;
 
@@ -870,6 +874,13 @@ private:
 
     /// Uploads hot_changed_pages from their copies.
     void UploadHotPages(Buffer& buffer);
+
+    /// gpu_page: copies the words that changed into the copy and queues them for upload.
+    void SyncHotGpuPage(DAddr page, HotPage& hot, const u8* guest);
+
+    /// A demoted gpu_page: protected again and clean when the guest bytes still match its copy
+    /// (all uploaded), instead of staying dirty for a whole-page upload.
+    void ProtectCleanHotPage(DAddr page, const HotPage& hot);
 
     /// GPU writes: hot pages they touch are tracked as usual again.
     void DemoteHotPages(DAddr device_addr, u64 size);
