@@ -456,6 +456,7 @@ private:
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
     std::vector<u32> binding_kinds; ///< EDEN_NX2_BINDMEMO: per texture/image view, in read order
+    BindingSets binding_sets; ///< EDEN_NX2_BINDSET
 
     const bool worker_only_build;
     bool uses_push_descriptor{false};

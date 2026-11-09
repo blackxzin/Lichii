@@ -694,15 +694,23 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         memos.resize(views.size());
         samplers.resize(sampler_handles.size());
         lookup = texture_cache.BeginBindingLookup(false);
-        FindImageBindings(texture_cache, lookup, binding_kinds,
-                          std::span(views.data(), views.size()),
-                          std::span(sampler_handles.data(), sampler_handles.size()),
-                          samplers.data(), memos.data(), misses, aliased_hit);
-        ResolveMissedBindings(texture_cache, lookup, std::span(views.data(), views.size()),
-                              std::span(sampler_handles.data(), sampler_handles.size()),
-                              std::span(samplers.data(), samplers.size()), memos.data(),
-                              std::span(misses.data(), misses.size()), aliased_hit,
-                              Spec::has_images);
+        const std::span view_span(views.data(), views.size());
+        const std::span handle_span(sampler_handles.data(), sampler_handles.size());
+        const bool use_sets = VideoCommon::Nx2BindMemo::BindSetEnabled();
+        if (!use_sets || !TakeBindingSet(texture_cache, binding_sets, lookup, view_span,
+                                         handle_span, samplers.data(), memos.data())) {
+            const u64 epoch = texture_cache.BindingsEpoch();
+            FindImageBindings(texture_cache, lookup, binding_kinds, view_span, handle_span,
+                              samplers.data(), memos.data(), misses, aliased_hit);
+            ResolveMissedBindings(texture_cache, lookup, view_span, handle_span,
+                                  std::span(samplers.data(), samplers.size()), memos.data(),
+                                  std::span(misses.data(), misses.size()), aliased_hit,
+                                  Spec::has_images);
+            if (use_sets && misses.empty()) {
+                KeepBindingSet(texture_cache, binding_sets, lookup, epoch, view_span,
+                               handle_span, memos.data());
+            }
+        }
     } else {
         if (use_bind_memo) {
             samplers.clear();

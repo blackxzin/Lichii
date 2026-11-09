@@ -1055,6 +1055,30 @@ typename TextureCache<P>::BindingMemo* TextureCache<P>::FindBinding(const Bindin
 }
 
 template <class P>
+bool TextureCache<P>::BindingEntriesHold(const BindingLookup& lookup,
+                                         const BindingMemo& memo) const noexcept {
+    using namespace BindingMemoDetail;
+    GuestPageCache* const pages = Nx2BindMemo::TexPagesEnabled() ? &lookup.pages : nullptr;
+    if (memo.tic_entry != ~0U) {
+        TICEntry guest_tic{};
+        ReadGuest(*gpu_memory, lookup.tic_pool + u64{memo.tic_entry} * sizeof(TICEntry), guest_tic,
+                  pages);
+        if (std::memcmp(&guest_tic, &memo.tic, sizeof(TICEntry)) != 0) {
+            return false;
+        }
+    }
+    if (memo.tsc_index != ~0U && memo.tsc_entry != ~0U) {
+        TSCEntry guest_tsc{};
+        ReadGuest(*gpu_memory, lookup.tsc_pool + u64{memo.tsc_entry} * sizeof(TSCEntry), guest_tsc,
+                  pages);
+        if (std::memcmp(&guest_tsc, &memo.tsc, sizeof(TSCEntry)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <class P>
 void TextureCache<P>::RecordBinding(const BindingLookup& lookup, u32 tic_handle, u32 tsc_index,
                                     u32 kind, ImageViewId view_id, SamplerId sampler_id,
                                     const void* payload, size_t payload_size, bool rescaled) {

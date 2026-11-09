@@ -104,6 +104,14 @@ namespace Detail {
     return enabled;
 }
 
+/// EDEN_NX2_BINDSET: a graphics pipeline keeps the last few sets of bindings it found all in the
+/// memo; a draw with the same handles, while no image, view, pool or mapping changed and within
+/// the frame, takes the whole set after checking only its guest TIC and TSC entries.
+[[nodiscard]] inline bool BindSetEnabled() noexcept {
+    static const bool enabled = Detail::SwitchOn("EDEN_NX2_BINDSET");
+    return enabled;
+}
+
 enum class Stat : u32 {
     // Binding lookups (one per texture/image binding of a draw or dispatch)
     Lookups,
@@ -160,6 +168,10 @@ enum class Stat : u32 {
     HandleWords,      ///< texture handle words read from a translated page
     HandleWordsSlow,  ///< read with MemoryManager::Read (page split, unmapped, shim, GPU-written)
     PageTranslations, ///< pages translated for handles, TIC and TSC entries
+    // Draws (EDEN_NX2_BINDSET)
+    SetHits,       ///< took a kept set of bindings whole
+    SetMissEntry,  ///< a kept set with the same handles, but a guest TIC or TSC entry changed
+    SetKept,       ///< all hit in the memo: the set was kept
     Count,
 };
 
@@ -239,9 +251,10 @@ inline void Report() {
     LOG_INFO(HW_GPU,
              "Texture lookup per second: pipeline keys patched: blending {:.0f}, vertex input "
              "{:.0f} | handle words {:.0f} from pages, {:.0f} read slowly | pages translated "
-             "{:.0f}",
+             "{:.0f} | binding sets: taken {:.0f}, entry changed {:.0f}, kept {:.0f}",
              rate(Stat::PipePatchBlend), rate(Stat::PipePatchVertexInput),
-             rate(Stat::HandleWords), rate(Stat::HandleWordsSlow), rate(Stat::PageTranslations));
+             rate(Stat::HandleWords), rate(Stat::HandleWordsSlow), rate(Stat::PageTranslations),
+             rate(Stat::SetHits), rate(Stat::SetMissEntry), rate(Stat::SetKept));
     g_stats_start = now;
 }
 

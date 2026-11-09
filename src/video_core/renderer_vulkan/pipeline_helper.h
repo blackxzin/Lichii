@@ -549,6 +549,133 @@ inline void ResolveMissedBindings(TextureCache& texture_cache,
     Note(Stat::BindingsResolved, views.size());
 }
 
+/// EDEN_NX2_BINDSET: the bindings of a draw that all hit in the memo, with copies of their memos
+/// (view, sampler, descriptor) and what FindBinding's checks of them depended on.
+struct BindingSet {
+    u64 epoch{}; ///< TextureCache::BindingsEpoch; 0: empty
+    u64 clock{};
+    u64 map_serial{};
+    const void* channel{};
+    GPUVAddr tic_pool{};
+    GPUVAddr tsc_pool{};
+    u32 tic_limit{};
+    u32 tsc_limit{};
+    std::vector<u32> handles; ///< every view's TIC handle, then every texture's TSC index
+    std::vector<TextureCache::BindingMemo> memos;
+};
+
+/// The kept sets of one pipeline, replaced in turn.
+struct BindingSets {
+    static constexpr size_t NUM_SETS = 4;
+    std::array<BindingSet, NUM_SETS> sets;
+    size_t victim{};
+};
+
+namespace BindingSetDetail {
+[[nodiscard]] inline bool SameState(const BindingSet& set, const TextureCache::BindingLookup& lookup,
+                                    u64 epoch) noexcept {
+    return set.epoch == epoch && set.clock == lookup.clock &&
+           set.map_serial == lookup.map_serial && set.channel == lookup.channel &&
+           set.tic_pool == lookup.tic_pool && set.tsc_pool == lookup.tsc_pool &&
+           set.tic_limit == lookup.tic_limit && set.tsc_limit == lookup.tsc_limit;
+}
+
+[[nodiscard]] inline bool SameHandles(const BindingSet& set,
+                                      std::span<const VideoCommon::ImageViewInOut> views,
+                                      std::span<const u32> sampler_handles) noexcept {
+    if (set.handles.size() != views.size() + sampler_handles.size()) {
+        return false;
+    }
+    for (size_t index = 0; index < views.size(); ++index) {
+        if (set.handles[index] != views[index].index) {
+            return false;
+        }
+    }
+    return std::equal(sampler_handles.begin(), sampler_handles.end(),
+                      set.handles.begin() + views.size());
+}
+} // namespace BindingSetDetail
+
+/// Fills the views, samplers and memos (pointing at the set's copies) from a kept set when what
+/// FindImageBindings would find is that set: the same handles, no image, view, pool or mapping
+/// event and no new frame since it was kept, and the same guest TIC and TSC entries.
+inline bool TakeBindingSet(TextureCache& texture_cache, BindingSets& kept,
+                           const TextureCache::BindingLookup& lookup,
+                           std::span<VideoCommon::ImageViewInOut> views,
+                           std::span<const u32> sampler_handles,
+                           VideoCommon::SamplerId* samplers, TextureCache::BindingMemo** memos) {
+    using VideoCommon::Nx2BindMemo::Note;
+    using Stat = VideoCommon::Nx2BindMemo::Stat;
+    const u64 epoch = texture_cache.BindingsEpoch();
+    for (BindingSet& set : kept.sets) {
+        if (!BindingSetDetail::SameState(set, lookup, epoch) ||
+            !BindingSetDetail::SameHandles(set, views, sampler_handles)) {
+            continue;
+        }
+        const bool entries_hold = std::ranges::all_of(set.memos, [&](const auto& memo) {
+            return texture_cache.BindingEntriesHold(lookup, memo);
+        });
+        if (!entries_hold) {
+            Note(Stat::SetMissEntry);
+            set.epoch = 0;
+            continue;
+        }
+        size_t sampler_index = 0;
+        for (size_t index = 0; index < views.size(); ++index) {
+            TextureCache::BindingMemo& memo = set.memos[index];
+            views[index].id = memo.view;
+            memos[index] = &memo;
+            if (views[index].blacklist) {
+                texture_cache.NoteBlacklistedBinding(memo.image);
+            }
+            if ((memo.kind & BindingKind::ClassMask) == BindingKind::Texture) {
+                samplers[sampler_index++] = memo.sampler;
+            }
+        }
+        Note(Stat::SetHits);
+        return true;
+    }
+    return false;
+}
+
+/// Keeps the bindings of a draw FindImageBindings found all in the memo, none with aliases (their
+/// hits also depend on the aliases' modification ticks), when nothing moved the epoch since
+/// `epoch` was read before the lookups.
+inline void KeepBindingSet(TextureCache& texture_cache, BindingSets& kept,
+                           const TextureCache::BindingLookup& lookup, u64 epoch,
+                           std::span<const VideoCommon::ImageViewInOut> views,
+                           std::span<const u32> sampler_handles,
+                           TextureCache::BindingMemo* const* memos) {
+    if (texture_cache.BindingsEpoch() != epoch || texture_cache.BindingClock() != lookup.clock) {
+        return;
+    }
+    for (size_t index = 0; index < views.size(); ++index) {
+        if (memos[index] == nullptr || memos[index]->aliased != 0) {
+            return;
+        }
+    }
+    BindingSet& set = kept.sets[kept.victim];
+    kept.victim = (kept.victim + 1) % BindingSets::NUM_SETS;
+    set.epoch = epoch;
+    set.clock = lookup.clock;
+    set.map_serial = lookup.map_serial;
+    set.channel = lookup.channel;
+    set.tic_pool = lookup.tic_pool;
+    set.tsc_pool = lookup.tsc_pool;
+    set.tic_limit = lookup.tic_limit;
+    set.tsc_limit = lookup.tsc_limit;
+    set.handles.clear();
+    for (const VideoCommon::ImageViewInOut& view : views) {
+        set.handles.push_back(view.index);
+    }
+    set.handles.insert(set.handles.end(), sampler_handles.begin(), sampler_handles.end());
+    set.memos.clear();
+    for (size_t index = 0; index < views.size(); ++index) {
+        set.memos.push_back(*memos[index]);
+    }
+    VideoCommon::Nx2BindMemo::Note(VideoCommon::Nx2BindMemo::Stat::SetKept);
+}
+
 /// What PushImageDescriptors takes from the memo and where it leaves the descriptor and
 /// rescaling bit of each binding it resolves, by view index, for RecordImageBindings.
 struct ImageBindingRecord {

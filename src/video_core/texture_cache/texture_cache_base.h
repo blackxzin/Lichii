@@ -431,6 +431,13 @@ public:
     [[nodiscard]] BindingMemo* FindBinding(const BindingLookup& lookup, u32 tic_handle,
                                            u32 tsc_index, u32 kind, const BindingProbe& probe);
 
+    /// EDEN_NX2_BINDSET: whether guest memory still holds the TIC and TSC entries a copy of a
+    /// memo FindBinding returned was recorded from. The rest of what FindBinding checks holds while
+    /// BindingsEpoch, BindingClock and the lookup's pools and mappings stay, for a memo without
+    /// aliases.
+    [[nodiscard]] bool BindingEntriesHold(const BindingLookup& lookup,
+                                          const BindingMemo& memo) const noexcept;
+
     /// Changes with every event that can make a binding memo stale.
     [[nodiscard]] u64 BindingClock() const noexcept {
         return binding_clock;
