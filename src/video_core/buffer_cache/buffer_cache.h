@@ -721,6 +721,7 @@ void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::UpdateComputeBuffers() {
+    VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ComputeUpdate};
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateComputeBuffers();
@@ -792,11 +793,18 @@ void BufferCache<P>::BindHostStageBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostComputeBuffers() {
-    BindHostComputeUniformBuffers();
+    using VideoCommon::Nx2Profile::Scope;
+    using VideoCommon::Nx2Profile::Zone;
+    {
+        Scope scope{Zone::ComputeHostUniform};
+        BindHostComputeUniformBuffers();
+    }
     if (channel_state->enabled_compute_storage_buffers != 0) {
+        Scope scope{Zone::ComputeHostStorage};
         BindHostComputeStorageBuffers();
     }
     if (channel_state->enabled_compute_texture_buffers != 0) {
+        Scope scope{Zone::ComputeHostTexture};
         BindHostComputeTextureBuffers();
     }
     if (any_buffer_uploaded) {
@@ -940,6 +948,7 @@ template <class P>
 void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                               bool is_written, u32 indirect_offset,
                                               const Shader::StorageWriteExtent& write_extent) {
+    VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ComputeSsboBind};
     if (ssbo_index >= channel_state->compute_storage_buffers.size()) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Storage buffer index {} exceeds maximum storage buffer count",
                   ssbo_index);

@@ -86,6 +86,12 @@ enum class Zone : u32 {
     ComputeBuffers,     ///< Storage, texture and uniform buffer binds and their uploads
     ComputeDescriptors, ///< Image descriptors and the descriptor buffer
     ComputeRecord,      ///< The dispatch's barrier and command after Configure
+    // Inside "compute buffers".
+    ComputeSsboBind,     ///< BindComputeStorageBuffer: pointer, binding and write extent
+    ComputeUpdate,       ///< UpdateComputeBuffers: buffer lookups of the bindings
+    ComputeHostUniform,  ///< BindHostComputeUniformBuffers
+    ComputeHostStorage,  ///< BindHostComputeStorageBuffers: sync, write marks, binds
+    ComputeHostTexture,  ///< BindHostComputeTextureBuffers
     Count,
 };
 
@@ -101,7 +107,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "ring decode", "delta apply", "cb write", "cb bind", "cb multi", "draw batch",
     "draw manager", "method 3D", "call", "finish macro", "query report", "counter reset",
     "render enable", "syncpoint", "wait for idle", "cache barrier", "idle hook",
-    "compute buffers", "compute descriptors", "compute record",
+    "compute buffers", "compute descriptors", "compute record", "cb ssbo bind", "cb update",
+    "cb host uniform", "cb host storage", "cb host texture",
 };
 static_assert(zone_names[static_cast<size_t>(Zone::Count) - 1] != nullptr,
               "every zone needs a name");
