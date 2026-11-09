@@ -21,6 +21,7 @@
 #include "common/common_types.h"
 #include "common/div_ceil.h"
 #include "common/logging.h"
+#include "video_core/buffer_cache/nx2_protect_diag.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -38,6 +39,7 @@ struct Nx2TrackerStats {
         if (!enabled) [[likely]] {
             return;
         }
+        Nx2ProtectDiag::Note(ranges, delta);
         u64 bytes = 0;
         for (const auto& range : ranges) {
             bytes += range.second;

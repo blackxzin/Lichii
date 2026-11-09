@@ -382,6 +382,7 @@ inline void Report() {
              static_cast<double>(protects[2]) * 1e9 / static_cast<double>(window),
              static_cast<double>(protects[3]) * 1e9 / static_cast<double>(window),
              rate(Stat::WriteMemoryCalls), rate(Stat::DirtyWriteSkip));
+    Nx2ProtectDiag::Report(window);
     LOG_INFO(HW_GPU,
              "Buffer cache hot demotes per second: GPU write {:.0f} (kept hot {:.0f}), no copy "
              "{:.0f}, GPU range or command list {:.0f}, idle {:.0f}, cost {:.0f}",

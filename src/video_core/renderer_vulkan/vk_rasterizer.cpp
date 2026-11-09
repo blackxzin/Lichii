@@ -474,6 +474,8 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
             [](void* argument) {
                 auto& self = *static_cast<RasterizerVulkan*>(argument);
                 self.write_handoff.Drain([&self](DAddr addr, u64 size) {
+                    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+                        VideoCommon::Nx2ProtectDiag::Caller::WriteHandoff};
                     if (!self.buffer_cache.OnCPUWrite(addr, size)) {
                         return;
                     }
@@ -2373,6 +2375,8 @@ void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pa
 }
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::FlushRegion};
     if (addr == 0 || size == 0) {
         return;
     }
@@ -2551,6 +2555,8 @@ void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::Cac
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::InvalidateRegion};
     if (addr == 0 || size == 0) {
         return;
     }
@@ -2573,6 +2579,8 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::InnerInvalidation};
     // The GPU's own cached writes (constant buffer data, every draw): most land where no image,
     // query or shader was ever registered, which page_filter tells without the caches' locks.
     const auto any = [&](const VideoCommon::PageFilter& filter) {
@@ -2613,6 +2621,8 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::CpuWriteTrap};
     DEBUG_ASSERT(addr != 0 || size != 0);
     // EDEN_NX2_WRITE_FASTPATH: guest write traps skip the texture cache's lock and the shader
     // cache where their page filters prove nothing was ever registered (as InnerInvalidation).
@@ -2665,6 +2675,8 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> ranges) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::CacheInvalidation};
     // Out of the GPU-written ranges first: applying one write downloads the GPU's bytes elsewhere
     // on its pages (WriteMemory), which would write over the next collected write.
     {
@@ -2677,6 +2689,8 @@ void RasterizerVulkan::OnCacheInvalidations(std::span<const std::pair<DAddr, u64
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::CacheInvalidation};
     if (addr == 0 || size == 0) {
         return;
     }
@@ -2693,6 +2707,8 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::TryCacheInvalidation};
     if (addr == 0 || size == 0) return true;
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -2713,6 +2729,8 @@ void RasterizerVulkan::InvalidateGPUCache() {
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::Unmap};
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapMemory(addr, size);
@@ -3513,6 +3531,8 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    VideoCommon::Nx2ProtectDiag::CallerScope protect_caller{
+        VideoCommon::Nx2ProtectDiag::Caller::InlineToMemory};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::InlineToMemory};
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {

@@ -108,6 +108,7 @@ void BufferCache<P>::RunGarbageCollector(bool aggressive_gc) {
 
 template <class P>
 void BufferCache<P>::TickFrame() {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::FrameFlush};
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;
@@ -203,6 +204,7 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::WriteMemory};
     Nx2BufCache::Note(Nx2BufCache::Stat::WriteMemoryCalls);
     Nx2NoteListHostWrite(device_addr, size);
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
@@ -269,6 +271,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
 
 template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::CachedWrite};
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return;
@@ -388,6 +391,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
 
 template <class P>
 void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     if constexpr (USE_MEMORY_MAPS) {
         if (download_cpu_read_ranges) {
             download_cpu_read_ranges = false;
@@ -415,6 +419,7 @@ void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>> ranges) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     constexpr bool has_mapped = requires(Buffer& buffer) { buffer.Mapped(); };
     if constexpr (!USE_MEMORY_MAPS) {
         for (const auto& [device_addr, size] : ranges) {
@@ -1066,6 +1071,7 @@ void BufferCache<P>::BindComputeTextureBuffer(size_t tbo_index, GPUVAddr gpu_add
 
 template <class P>
 void BufferCache<P>::FlushCachedWrites() {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::CachedWrite};
     memory_tracker.FlushCachedWrites();
     ++cpu_dirty_epoch;
 }
@@ -1090,6 +1096,7 @@ bool BufferCache<P>::ShouldWaitAsyncFlushes() const noexcept {
 
 template <class P>
 void BufferCache<P>::CommitAsyncFlushesHigh() {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     AccumulateFlushes();
 
     if (committed_gpu_modified_ranges.empty()) {
@@ -3136,6 +3143,7 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Sync};
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
     // walk only the dirty ones. Verify walks every word and checks the clean words.
     const bool skip_clean = !Nx2Perf::Verify();
@@ -3756,6 +3764,7 @@ void BufferCache<P>::SyncHotGpuPage(DAddr page, HotPage& hot, const u8* guest) {
 
 template <class P>
 void BufferCache<P>::ProtectCleanHotPage(DAddr page, const HotPage& hot) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Hot};
     if (!hot.gpu_page || !hot.valid) {
         return;
     }
@@ -3772,6 +3781,7 @@ void BufferCache<P>::ProtectCleanHotPage(DAddr page, const HotPage& hot) {
 
 template <class P>
 void BufferCache<P>::ApplyHotPageChanges() {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Hot};
     for (const DAddr page : hot_demote_pages) {
         const auto it = hot_pages.find(page);
         if (it == hot_pages.end()) {
@@ -3878,6 +3888,7 @@ void BufferCache<P>::UploadHotPages(Buffer& buffer) {
 
 template <class P>
 void BufferCache<P>::DemoteHotPages(DAddr device_addr, u64 size) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Hot};
     if (hot_pages.empty() || size == 0) {
         return;
     }
@@ -4105,11 +4116,13 @@ void BufferCache<P>::MappedUploadMemoryRefreshingBanks([[maybe_unused]] Buffer& 
 
 template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     DownloadBufferMemory(buffer, buffer.CpuAddr(), buffer.SizeBytes());
 }
 
 template <class P>
 void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     struct Download {
         BufferId buffer_id;
         BufferCopy copy;
@@ -4158,6 +4171,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
 
 template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::Download};
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
@@ -4228,6 +4242,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    Nx2ProtectDiag::SiteScope protect_site{Nx2ProtectDiag::Site::DeleteBuffer};
     ++binding_epoch;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
