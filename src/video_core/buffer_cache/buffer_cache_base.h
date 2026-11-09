@@ -934,11 +934,19 @@ private:
             const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
             return value == nullptr || value[0] != '0';
         }();
+        // EDEN_NX2_FENCE_ONE_SCAN (on unless 0): the exact path below walks the Preflushable
+        // pages anyway, so it arms the read traps from that walk, once, instead of scanning the
+        // range for Preflushable pages first and arming them a second time for the rest.
+        static const bool one_scan = [] {
+            const char* value = std::getenv("EDEN_NX2_FENCE_ONE_SCAN");
+            return value == nullptr || value[0] != '0';
+        }();
+        const bool native = Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+        const bool scan_once = one_scan && exact && !AsyncBufferDownloads();
         // Native titles: until this write's download lands, a guest read of a Preflushable page
         // must reach GetFlushArea, which waits for the download or flushes it. Arming its read
         // trap again also drops the cores' cached read areas (reactive flushing).
-        if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
-            memory_tracker.IsRegionPreflushable(device_addr, size)) {
+        if (!scan_once && native && memory_tracker.IsRegionPreflushable(device_addr, size)) {
             ArmReadTraps(device_addr, size);
         }
         if (AsyncBufferDownloads()) {
@@ -966,6 +974,9 @@ private:
         });
         if (queued < size) {
             PrefetchCpuReadRanges(device_addr, size);
+        }
+        // Without scan_once the traps over Preflushable pages were armed above.
+        if (queued < size || (scan_once && native && queued != 0)) {
             ArmReadTraps(device_addr, size);
         }
         if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
