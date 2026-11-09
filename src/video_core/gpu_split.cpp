@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <optional>
 #include <thread>
 
 #ifdef _MSC_VER
@@ -48,6 +50,37 @@ void Pause() {
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
+
+/// Pauses a split wait spins before it sleeps. EDEN_NX2_SPLIT_SPIN_US=<n> spins about n
+/// microseconds (0: sleep at once), measured against this CPU's pause; unset keeps `fallback`.
+u32 SpinLimit(u32 fallback) {
+    static const std::optional<u32> spin_us = []() -> std::optional<u32> {
+        const char* value = std::getenv("EDEN_NX2_SPLIT_SPIN_US");
+        if (value == nullptr || value[0] == 0) {
+            return std::nullopt;
+        }
+        return static_cast<u32>(std::strtoul(value, nullptr, 10));
+    }();
+    if (!spin_us) {
+        return fallback;
+    }
+    static const u32 limit = [] {
+        constexpr u32 samples = 20000;
+        const auto start = std::chrono::steady_clock::now();
+        for (u32 i = 0; i < samples; ++i) {
+            Pause();
+        }
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        const double pause_ns = (std::max)(static_cast<double>(ns) / samples, 1.0);
+        const u32 spins = static_cast<u32>(*spin_us * 1000.0 / pause_ns);
+        LOG_INFO(HW_GPU, "Split waits spin {} us: {} pauses of {:.1f} ns", *spin_us, spins,
+                 pause_ns);
+        return spins;
+    }();
+    return limit;
+}
 
 // EDEN_NX2_RING_PREFETCH=0: the back reads each ring line only when it gets to it.
 const bool g_ring_prefetch = Nx2Switch("EDEN_NX2_RING_PREFETCH", true);
@@ -915,9 +948,16 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
-    if (spins < 16384) {
+    static const u32 spin_limit = SpinLimit(16384);
+    if (spins == 0) {
+        Nx2Profile::Add(Nx2Profile::Counter::SplitWaits, 1);
+    }
+    if (spins < spin_limit) {
         Pause();
         return;
+    }
+    if (spins == spin_limit) {
+        Nx2Profile::Add(Nx2Profile::Counter::SplitWaitsPastSpin, 1);
     }
     if (!back_running.load(std::memory_order_acquire)) {
         std::this_thread::yield();
@@ -1197,12 +1237,17 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             back_idle.store(true, std::memory_order_relaxed);
+            Nx2Profile::Add(Nx2Profile::Counter::SplitWaits, 1);
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            static const u32 spin_limit = SpinLimit(8192);
+            for (u32 spins = 0; spins < spin_limit && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
+            }
+            if (available == read_position) {
+                Nx2Profile::Add(Nx2Profile::Counter::SplitWaitsPastSpin, 1);
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);

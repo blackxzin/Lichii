@@ -175,6 +175,8 @@ enum class Counter : u32 {
     RingEntries,    ///< Split back: ring entries executed
     FusedWrites,    ///< Split back: compute writes in Kind::Writes entries (EDEN_NX2_COMPUTE_FUSE)
     MergedUploads,  ///< Split back: inline upload flushes joined to the one before (I2M_MERGE)
+    SplitWaits,     ///< Split: waits for the other half (front: for the back; back: for work)
+    SplitWaitsPastSpin, ///< Of SplitWaits: still waiting when the spin ended (EDEN_NX2_SPLIT_SPIN_US)
     Count,
 };
 
@@ -342,6 +344,13 @@ inline bool Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
+    if (const u64 waits = data.counters[static_cast<size_t>(Counter::SplitWaits)]; waits != 0) {
+        line += fmt::format(" | split waits {:.0f} ({:.0f} past the spin)",
+                            static_cast<double>(waits) * 1e9 / window,
+                            static_cast<double>(
+                                data.counters[static_cast<size_t>(Counter::SplitWaitsPastSpin)]) *
+                                1e9 / window);
+    }
     if (data.counters[static_cast<size_t>(Counter::RingEntries)] != 0) {
         const auto per_second = [&](Counter counter) {
             return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
