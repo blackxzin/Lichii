@@ -374,6 +374,7 @@ void GpuSplit::WaitForSpace(size_t words) {
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
+    const Nx2Profile::FrontWaitScope front_wait{Nx2Profile::FrontWait::RingFull};
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (write_position + words - consumed_cache <= RingWords) {
@@ -410,6 +411,7 @@ void GpuSplit::Drain(DrainSite site) {
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
+    const Nx2Profile::FrontWaitScope front_wait{Nx2Profile::FrontWait::Drain};
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
@@ -938,6 +940,9 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
         RunPendingFlush();
     }
     Nx2Profile::Scope scope{Nx2Profile::Zone::WriterWait};
+    const Nx2Profile::FrontWaitScope front_wait{site == DrainSite::NarrowListWriters
+                                                    ? Nx2Profile::FrontWait::ListWriters
+                                                    : Nx2Profile::FrontWait::Writers};
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;

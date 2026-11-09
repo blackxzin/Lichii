@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #ifdef _MSC_VER
 #include <intrin.h>
 #elif defined(ARCHITECTURE_x86_64)
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 #include "common/common_types.h"
@@ -180,8 +182,29 @@ enum class Counter : u32 {
     Count,
 };
 
+// While the split's front waits for its back, the back's zones are summed apart too, by why the
+// front waits: what the back does in the time the front can't go on.
+enum class FrontWait : u32 {
+    None,
+    ListWriters, ///< DrainSite::NarrowListWriters (command list reads)
+    Writers,     ///< Other narrowed waits (GpuSplit::WaitFor)
+    Drain,       ///< GpuSplit::Drain
+    RingFull,    ///< GpuSplit::WaitForSpace
+    Count,
+};
+inline constexpr std::array<const char*, static_cast<size_t>(FrontWait::Count)> front_wait_names{
+    "", "list writers", "other writer waits", "drains", "ring full"};
+inline std::atomic<u32> g_front_wait{0};
+inline std::atomic<u64> g_front_wait_start{0};
+/// Ticks the front waited, by FrontWait (taken by the back's Report).
+inline std::array<std::atomic<u64>, static_cast<size_t>(FrontWait::Count)> g_front_wait_ticks{};
+
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
+    /// exclusive_ns while the front waited, by FrontWait (back thread).
+    std::array<std::array<u64, static_cast<size_t>(Zone::Count)>,
+               static_cast<size_t>(FrontWait::Count)>
+        front_wait_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
     std::array<u64, static_cast<size_t>(Counter::Count)> counters{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
@@ -209,12 +232,20 @@ public:
         if (!enabled) {
             return;
         }
-        const u64 elapsed = Ticks() - start;
+        const u64 end = Ticks();
+        const u64 elapsed = end - start;
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
-        data.exclusive_ns[index] += elapsed - data.child_ns;
+        const u64 exclusive = elapsed - data.child_ns;
+        data.exclusive_ns[index] += exclusive;
         ++data.count[index];
         data.child_ns = parent_child_ns + elapsed;
+        if (const u32 wait = g_front_wait.load(std::memory_order_relaxed); wait != 0) {
+            // The part since the wait began (the zone's own time is spread evenly over it).
+            const u64 wait_start = g_front_wait_start.load(std::memory_order_relaxed);
+            const u64 overlap = end > wait_start ? (std::min)(exclusive, end - wait_start) : 0;
+            data.front_wait_ns[wait][index] += overlap;
+        }
     }
 
     Scope(const Scope&) = delete;
@@ -291,6 +322,68 @@ inline void AddDrain(DrainSite site, u64 start) {
         const auto index = static_cast<size_t>(site);
         t_data.drain_ns[index] += Ticks() - start;
         ++t_data.drain_count[index];
+    }
+}
+
+/// The split's front waits for its back while this lives (FrontWait).
+class FrontWaitScope {
+public:
+    explicit FrontWaitScope(FrontWait kind_) : kind{kind_}, enabled{Enabled()} {
+        if (!enabled) {
+            return;
+        }
+        start = Ticks();
+        g_front_wait_start.store(start, std::memory_order_relaxed);
+        g_front_wait.store(static_cast<u32>(kind), std::memory_order_release);
+    }
+    ~FrontWaitScope() {
+        if (!enabled) {
+            return;
+        }
+        g_front_wait.store(0, std::memory_order_release);
+        g_front_wait_ticks[static_cast<size_t>(kind)].fetch_add(Ticks() - start,
+                                                                std::memory_order_relaxed);
+    }
+    FrontWaitScope(const FrontWaitScope&) = delete;
+    FrontWaitScope& operator=(const FrontWaitScope&) = delete;
+
+private:
+    FrontWait kind;
+    bool enabled;
+    u64 start{};
+};
+
+/// Back thread: what its zones took while the front waited, per second of wall time.
+inline void ReportFrontWaits(const ThreadData& data, u64 window_ticks) {
+    static constexpr size_t TOP = 10;
+    std::string text;
+    for (size_t kind = 1; kind < front_wait_names.size(); ++kind) {
+        const u64 waited = g_front_wait_ticks[kind].exchange(0, std::memory_order_relaxed);
+        if (waited == 0) {
+            continue;
+        }
+        const auto& zones = data.front_wait_ns[kind];
+        u64 zoned = 0;
+        std::array<size_t, static_cast<size_t>(Zone::Count)> order{};
+        for (size_t i = 0; i < order.size(); ++i) {
+            order[i] = i;
+            zoned += zones[i];
+        }
+        const size_t top = (std::min)(order.size(), TOP);
+        std::partial_sort(order.begin(), order.begin() + top, order.end(),
+                          [&](size_t a, size_t b) { return zones[a] > zones[b]; });
+        const auto ms = [&](u64 ticks) {
+            return static_cast<double>(ticks) * 1000.0 / static_cast<double>(window_ticks);
+        };
+        text += fmt::format(" | {} {:.1f} ms: in no zone (idle or untracked) {:.1f} ms",
+                            front_wait_names[kind], ms(waited),
+                            ms(waited > zoned ? waited - zoned : 0));
+        for (size_t i = 0; i < top && zones[order[i]] != 0; ++i) {
+            text += fmt::format(", {} {:.1f} ms", zone_names[order[i]], ms(zones[order[i]]));
+        }
+    }
+    if (!text.empty()) {
+        LOG_INFO(HW_GPU, "GPU back thread while the front waits, per second:{}", text);
     }
 }
 
@@ -384,6 +477,9 @@ inline bool Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(window) / 1e6);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
+    if (std::string_view{thread_name} == "GPU back thread") {
+        ReportFrontWaits(data, window_ticks);
+    }
     if (const std::string methods = TopMethods(t_method_count, &t_method_same, window); !methods.empty()) {
         LOG_INFO(HW_GPU, "{} methods per second:{}", thread_name, methods);
     }
