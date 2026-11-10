@@ -2892,10 +2892,14 @@ void RasterizerVulkan::FlushCommands() {
     }
     draw_counter = 0;
     pending_native_work = false;
-    // EDEN_NX2_EXP61 (live, 0 = off): nothing recorded since the last submit, nothing to send.
-    // A fence with a download is flushed by InnerFence::Queue and then again here with an empty
-    // command buffer: ~4,600 empty submits a second in Castle Town (fable52_answer_8 s8).
-    if (VideoCore::Nx2Debug::Experiment(61) != 0 && !scheduler.RecordedSinceSubmit()) {
+    // Nothing recorded since the last submit, nothing to send. A fence with a download is flushed
+    // by InnerFence::Queue and then again here with an empty command buffer: ~4,600 empty submits
+    // a second in Castle Town (Fritchii EXP61). EDEN_NX2_SKIP_EMPTY_FLUSH=0 turns it off.
+    static const bool skip_empty = [] {
+        const char* value = std::getenv("EDEN_NX2_SKIP_EMPTY_FLUSH");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (skip_empty && !scheduler.RecordedSinceSubmit()) {
         return;
     }
     // Fences with downloads or queries come here right after queueing: ~9,400 a second in
