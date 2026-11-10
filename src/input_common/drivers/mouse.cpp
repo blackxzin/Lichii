@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fmt/ranges.h>
 #include <math.h>
 
@@ -25,6 +27,11 @@ constexpr int mouse_axis_x = 0;
 constexpr int mouse_axis_y = 1;
 constexpr int wheel_axis_x = 2;
 constexpr int wheel_axis_y = 3;
+// Wheel steps also read as buttons (map them like any mouse button): each step holds its
+// direction's button this long, so a step turns a camera mapped to it a little.
+constexpr int wheel_up_button = 8;
+constexpr int wheel_down_button = 9;
+constexpr auto wheel_step_hold = std::chrono::milliseconds{120};
 constexpr PadIdentifier identifier = {
     .guid = Common::UUID{},
     .port = 0,
@@ -162,6 +169,13 @@ void Mouse::Move(int x, int y, int center_x, int center_y) {
 
 void Mouse::NotifyChanged() {
     auto const timestamp = Common::SteadyClock::Now();
+    for (int direction = 0; direction < 2; ++direction) {
+        auto& until = wheel_held_until[direction];
+        if (until != Common::SteadyClock::time_point{} && timestamp >= until) {
+            until = {};
+            SetButton(identifier, direction == 0 ? wheel_up_button : wheel_down_button, false);
+        }
+    }
     UpdateStickInput(timestamp);
     UpdateMotionInput(timestamp);
     last_notify_timestamp = timestamp;
@@ -218,6 +232,12 @@ void Mouse::MouseWheelChange(int x, int y) {
     last_motion_change[2] += static_cast<f32>(y);
     SetAxis(identifier, wheel_axis_x, f32(wheel_position[0]));
     SetAxis(identifier, wheel_axis_y, f32(wheel_position[1]));
+    if (y != 0) {
+        const int direction = y > 0 ? 0 : 1;
+        const int steps = (std::max)(1, std::abs(y) / 120);
+        wheel_held_until[direction] = Common::SteadyClock::Now() + wheel_step_hold * steps;
+        SetButton(identifier, direction == 0 ? wheel_up_button : wheel_down_button, true);
+    }
 }
 
 void Mouse::ReleaseAllButtons() {

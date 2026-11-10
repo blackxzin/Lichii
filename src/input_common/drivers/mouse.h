@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <thread>
 #include <chrono>
 
@@ -114,6 +116,8 @@ private:
     Common::Vec<float, 2> last_mouse_change;
     Common::Vec<float, 3> last_motion_change;
     Common::Vec<int, 2> wheel_position;
+    /// Until when each wheel direction (up, down) reads as a held button (wheel_up_button, ...).
+    std::array<Common::SteadyClock::time_point, 2> wheel_held_until{};
     Common::SteadyClock::time_point last_notify_timestamp{};
     bool button_pressed = false;
 };
