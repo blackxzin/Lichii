@@ -2342,6 +2342,14 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     loading_screen->show();
 
     emulation_running = true;
+    // EDEN_MOUSE_PANNING=1: start with mouse panning on, as the Toggle Mouse Panning hotkey does
+    // (the setting itself is not saved).
+    if (const char* panning = std::getenv("EDEN_MOUSE_PANNING");
+        panning != nullptr && panning[0] == '1' && !Settings::values.mouse_panning) {
+        Settings::values.mouse_panning = true;
+        render_window->installEventFilter(render_window);
+        render_window->setAttribute(Qt::WA_Hover, true);
+    }
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
     } else if (!(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
